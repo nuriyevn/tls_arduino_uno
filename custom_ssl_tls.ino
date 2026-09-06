@@ -34,7 +34,12 @@ uint32_t modMulCount = 0;
 extern char __heap_start;
 extern char *__brkval;
 
-
+struct GCM128
+{
+    uint8_t H[16];   // Hash subkey
+    uint8_t Y[16];   // GHASH accumulator
+};
+EthernetClient client;
 
 struct U256
 {
@@ -227,6 +232,366 @@ void aes128EncryptBlock(    const uint8_t key[16],    uint8_t block[16])
     aesAddRoundKey(block, roundKey);
 }
 
+// =======================================================
+// AES-GCM — GHASH
+// =======================================================
+
+
+
+
+// X = X * H in GF(2^128)
+static void gcmMultiply(
+    uint8_t result[16],
+    const uint8_t X[16],
+    const uint8_t H[16])
+{
+    uint8_t Z[16] = {0};
+    uint8_t V[16];
+
+    for (uint8_t i = 0; i < 16; i++)
+        V[i] = H[i];
+
+    for (uint8_t i = 0; i < 128; i++)
+    {
+        uint8_t bit =
+            (X[i >> 3] >> (7 - (i & 7))) & 1;
+
+        if (bit)
+        {
+            for (uint8_t j = 0; j < 16; j++)
+                Z[j] ^= V[j];
+        }
+
+        uint8_t lsb = V[15] & 1;
+
+        for (int8_t j = 15; j > 0; j--)
+            V[j] =
+                (uint8_t)((V[j] >> 1) |
+                          (V[j - 1] << 7));
+
+        V[0] >>= 1;
+
+        if (lsb)
+            V[0] ^= 0xE1;
+    }
+
+    for (uint8_t i = 0; i < 16; i++)
+        result[i] = Z[i];
+}
+
+
+static void gcmXorBlock(
+    uint8_t dst[16],
+    const uint8_t src[16])
+{
+    for (uint8_t i = 0; i < 16; i++)
+        dst[i] ^= src[i];
+}
+
+
+static void gcmInit(
+    GCM128 &ctx,
+    const uint8_t key[16])
+{
+    uint8_t zero[16] = {0};
+
+    // H = AES_K(0^128)
+    aes128EncryptBlock(key, zero);
+
+    for (uint8_t i = 0; i < 16; i++)
+        ctx.H[i] = zero[i];
+
+    for (uint8_t i = 0; i < 16; i++)
+        ctx.Y[i] = 0;
+}
+
+
+static void gcmHashBlock(
+    GCM128 &ctx,
+    const uint8_t block[16])
+{
+    gcmXorBlock(ctx.Y, block);
+
+    uint8_t product[16];
+
+    gcmMultiply(
+        product,
+        ctx.Y,
+        ctx.H
+    );
+
+    for (uint8_t i = 0; i < 16; i++)
+        ctx.Y[i] = product[i];
+}
+
+static void gcmIncrementCounter(uint8_t counter[16])
+{
+    for (int8_t i = 15; i >= 12; i--)
+    {
+        counter[i]++;
+
+        if (counter[i] != 0)
+            break;
+    }
+}
+
+static void tlsGcmMakeNonce(
+    uint8_t nonce[12],
+    const uint8_t fixedIV[4],
+    uint64_t sequenceNumber)
+{
+    // TLS 1.2 AES-GCM nonce:
+    // fixed IV (4 bytes) || sequence number (8 bytes)
+
+    nonce[0] = fixedIV[0];
+    nonce[1] = fixedIV[1];
+    nonce[2] = fixedIV[2];
+    nonce[3] = fixedIV[3];
+
+    nonce[4]  = (uint8_t)(sequenceNumber >> 56);
+    nonce[5]  = (uint8_t)(sequenceNumber >> 48);
+    nonce[6]  = (uint8_t)(sequenceNumber >> 40);
+    nonce[7]  = (uint8_t)(sequenceNumber >> 32);
+    nonce[8]  = (uint8_t)(sequenceNumber >> 24);
+    nonce[9]  = (uint8_t)(sequenceNumber >> 16);
+    nonce[10] = (uint8_t)(sequenceNumber >> 8);
+    nonce[11] = (uint8_t)(sequenceNumber);
+}
+
+static void tlsGcmMakeJ0(
+    uint8_t J0[16],
+    const uint8_t nonce[12])
+{
+    for (uint8_t i = 0; i < 12; i++)
+        J0[i] = nonce[i];
+
+    J0[12] = 0;
+    J0[13] = 0;
+    J0[14] = 0;
+    J0[15] = 1;
+}
+
+static void tlsGcmMakeAAD(
+    uint8_t aad[13],
+    uint64_t sequenceNumber,
+    uint8_t contentType,
+    uint8_t versionMajor,
+    uint8_t versionMinor,
+    uint16_t plaintextLength)
+{
+    // 8-byte TLS record sequence number
+    aad[0] = (uint8_t)(sequenceNumber >> 56);
+    aad[1] = (uint8_t)(sequenceNumber >> 48);
+    aad[2] = (uint8_t)(sequenceNumber >> 40);
+    aad[3] = (uint8_t)(sequenceNumber >> 32);
+    aad[4] = (uint8_t)(sequenceNumber >> 24);
+    aad[5] = (uint8_t)(sequenceNumber >> 16);
+    aad[6] = (uint8_t)(sequenceNumber >> 8);
+    aad[7] = (uint8_t)sequenceNumber;
+
+    // TLS record header fields
+    aad[8]  = contentType;
+    aad[9]  = versionMajor;
+    aad[10] = versionMinor;
+
+    aad[11] = (uint8_t)(plaintextLength >> 8);
+    aad[12] = (uint8_t)plaintextLength;
+}
+
+static bool tlsSendChangeCipherSpec()
+{
+    if (client.write((uint8_t)0x14) != 1) return false;
+    if (client.write((uint8_t)0x03) != 1) return false;
+    if (client.write((uint8_t)0x03) != 1) return false;
+
+    if (client.write((uint8_t)0x00) != 1) return false;
+    if (client.write((uint8_t)0x01) != 1) return false;
+
+    if (client.write((uint8_t)0x01) != 1) return false;
+
+    return true;
+}
+
+static void gcmCtrCrypt(
+    const uint8_t key[16],
+    uint8_t counter[16],
+    uint8_t *data,
+    uint16_t length)
+{
+    uint8_t stream[16];
+
+    while (length)
+    {
+        for (uint8_t i = 0; i < 16; i++)
+            stream[i] = counter[i];
+
+        aes128EncryptBlock(key, stream);
+
+        uint8_t n = (length < 16) ? length : 16;
+
+        for (uint8_t i = 0; i < n; i++)
+            data[i] ^= stream[i];
+
+        data += n;
+        length -= n;
+
+        gcmIncrementCounter(counter);
+    }
+}
+
+static void gcmMakeTag(
+    const uint8_t key[16],
+    const uint8_t J0[16],
+    const uint8_t *aad,
+    uint16_t aadLen,
+    const uint8_t *ciphertext,
+    uint16_t ciphertextLen,
+    uint8_t tag[16])
+{
+    GCM128 ctx;
+    gcmInit(ctx, key);
+
+    uint16_t originalAadLen = aadLen;
+    uint16_t originalCiphertextLen = ciphertextLen;
+
+    // AAD
+    while (aadLen >= 16)
+    {
+        gcmHashBlock(ctx, aad);
+        aad += 16;
+        aadLen -= 16;
+    }
+
+    if (aadLen)
+    {
+        uint8_t block[16] = {0};
+
+        for (uint8_t i = 0; i < aadLen; i++)
+            block[i] = aad[i];
+
+        gcmHashBlock(ctx, block);
+    }
+
+    // Ciphertext
+    while (ciphertextLen >= 16)
+    {
+        gcmHashBlock(ctx, ciphertext);
+        ciphertext += 16;
+        ciphertextLen -= 16;
+    }
+
+    if (ciphertextLen)
+    {
+        uint8_t block[16] = {0};
+
+        for (uint8_t i = 0; i < ciphertextLen; i++)
+            block[i] = ciphertext[i];
+
+        gcmHashBlock(ctx, block);
+    }
+
+    // Length block
+    uint8_t lengths[16] = {0};
+
+    uint32_t aadBits =
+        (uint32_t)originalAadLen * 8UL;
+
+    uint32_t ciphertextBits =
+        (uint32_t)originalCiphertextLen * 8UL;
+
+    lengths[4] = aadBits >> 24;
+    lengths[5] = aadBits >> 16;
+    lengths[6] = aadBits >> 8;
+    lengths[7] = aadBits;
+
+    lengths[12] = ciphertextBits >> 24;
+    lengths[13] = ciphertextBits >> 16;
+    lengths[14] = ciphertextBits >> 8;
+    lengths[15] = ciphertextBits;
+
+    gcmHashBlock(ctx, lengths);
+
+    // Tag = AES(K, J0) XOR GHASH
+    uint8_t tagBlock[16];
+
+    for (uint8_t i = 0; i < 16; i++)
+        tagBlock[i] = J0[i];
+
+    aes128EncryptBlock(key, tagBlock);
+
+    for (uint8_t i = 0; i < 16; i++)
+        tag[i] = tagBlock[i] ^ ctx.Y[i];
+}
+
+static void tlsGcmEncryptRecord(
+    const uint8_t key[16],
+    const uint8_t fixedIV[4],
+    uint64_t sequenceNumber,
+    uint8_t contentType,
+    uint8_t versionMajor,
+    uint8_t versionMinor,
+    uint8_t *plaintext,
+    uint16_t plaintextLength,
+    uint8_t tag[16])
+{
+    // 1. Build TLS nonce
+    uint8_t nonce[12];
+
+    tlsGcmMakeNonce(
+        nonce,
+        fixedIV,
+        sequenceNumber
+    );
+
+    // 2. Build GCM J0
+    uint8_t J0[16];
+
+    tlsGcmMakeJ0(
+        J0,
+        nonce
+    );
+
+    // 3. Build TLS AAD
+    uint8_t aad[13];
+
+    tlsGcmMakeAAD(
+        aad,
+        sequenceNumber,
+        contentType,
+        versionMajor,
+        versionMinor,
+        plaintextLength
+    );
+
+    // 4. Counter = J0 + 1
+    uint8_t counter[16];
+
+    for (uint8_t i = 0; i < 16; i++)
+        counter[i] = J0[i];
+
+    gcmIncrementCounter(counter);
+
+    // 5. Encrypt plaintext in-place
+    gcmCtrCrypt(
+        key,
+        counter,
+        plaintext,
+        plaintextLength
+    );
+
+    // 6. Calculate authentication tag
+    gcmMakeTag(
+        key,
+        J0,
+        aad,
+        13,
+        plaintext,
+        plaintextLength,
+        tag
+    );
+}
+
+
 const uint8_t aesTestKey[16] PROGMEM =
 {
     0x00, 0x01, 0x02, 0x03,
@@ -270,6 +635,9 @@ SHA256Context tlsHmacContext;
 bool tlsTranscriptActive = false;
 uint8_t tlsTranscriptHash[32];
 bool tlsTranscriptRecord = false;
+uint64_t tlsWriteSequence = 0;
+uint64_t tlsReadSequence = 0;
+
 
 void tlsTranscriptInit()
 {
@@ -283,7 +651,193 @@ void tlsTranscriptUpdateByte(uint8_t value)
 
 void tlsTranscriptFinal(uint8_t digest[32])
 {
+    // Save SHA-256 context so we can continue the transcript later.
+
+    // Save state[8] = 32 bytes
+    for (uint8_t i = 0; i < 8; i++)
+    {
+        tlsHmacInnerHash[i * 4]     = (uint8_t)(tlsHmacContext.state[i] >> 24);
+        tlsHmacInnerHash[i * 4 + 1] = (uint8_t)(tlsHmacContext.state[i] >> 16);
+        tlsHmacInnerHash[i * 4 + 2] = (uint8_t)(tlsHmacContext.state[i] >> 8);
+        tlsHmacInnerHash[i * 4 + 3] = (uint8_t)tlsHmacContext.state[i];
+    }
+
+    // Save bitCount = 8 bytes
+    uint64_t savedBitCount = tlsHmacContext.bitCount;
+
+    // Save buffered data = 64 bytes
+    for (uint8_t i = 0; i < 64; i++)
+        tlsPrfSeed[i] = tlsHmacContext.buffer[i];
+
+    // Finalize to produce the digest.
     sha256Final(tlsHmacContext, digest);
+
+    // Restore state[8].
+    for (uint8_t i = 0; i < 8; i++)
+    {
+        tlsHmacContext.state[i] =
+            ((uint32_t)tlsHmacInnerHash[i * 4] << 24) |
+            ((uint32_t)tlsHmacInnerHash[i * 4 + 1] << 16) |
+            ((uint32_t)tlsHmacInnerHash[i * 4 + 2] << 8) |
+            ((uint32_t)tlsHmacInnerHash[i * 4 + 3]);
+    }
+
+    // Restore bitCount.
+    tlsHmacContext.bitCount = savedBitCount;
+
+    // Restore buffered data.
+    for (uint8_t i = 0; i < 64; i++)
+        tlsHmacContext.buffer[i] = tlsPrfSeed[i];
+}
+
+static bool tlsSendGCMRecord(
+    uint8_t contentType,
+    uint8_t *plaintext,
+    uint16_t plaintextLength)
+{
+    uint8_t nonce[12];
+    uint8_t J0[16];
+    uint8_t counter[16];
+    uint8_t aad[13];
+    uint8_t tag[16];
+
+    // --------------------------------------------------
+    // Nonce = client_write_IV || sequence_number
+    // --------------------------------------------------
+
+    tlsGcmMakeNonce(
+        nonce,
+        clientWriteIV,
+        tlsWriteSequence
+    );
+
+    tlsGcmMakeJ0(J0, nonce);
+
+    // --------------------------------------------------
+    // TLS AAD:
+    //
+    // sequence_number
+    // content_type
+    // version
+    // plaintext_length
+    // --------------------------------------------------
+
+    aad[0] = (uint8_t)(tlsWriteSequence >> 56);
+    aad[1] = (uint8_t)(tlsWriteSequence >> 48);
+    aad[2] = (uint8_t)(tlsWriteSequence >> 40);
+    aad[3] = (uint8_t)(tlsWriteSequence >> 32);
+    aad[4] = (uint8_t)(tlsWriteSequence >> 24);
+    aad[5] = (uint8_t)(tlsWriteSequence >> 16);
+    aad[6] = (uint8_t)(tlsWriteSequence >> 8);
+    aad[7] = (uint8_t)(tlsWriteSequence);
+
+    aad[8]  = contentType;
+    aad[9]  = 0x03;
+    aad[10] = 0x03;
+
+    aad[11] = (uint8_t)(plaintextLength >> 8);
+    aad[12] = (uint8_t)(plaintextLength);
+
+    // --------------------------------------------------
+    // Counter = inc32(J0)
+    // --------------------------------------------------
+
+    for (uint8_t i = 0; i < 16; i++)
+        counter[i] = J0[i];
+
+    gcmIncrementCounter(counter);
+
+    // --------------------------------------------------
+    // Encrypt plaintext IN PLACE
+    // --------------------------------------------------
+
+    gcmCtrCrypt(
+        clientWriteKey,
+        counter,
+        plaintext,
+        plaintextLength
+    );
+
+    // --------------------------------------------------
+    // Authentication tag
+    // --------------------------------------------------
+
+    gcmMakeTag(
+        clientWriteKey,
+        J0,
+        aad,
+        13,
+        plaintext,
+        plaintextLength,
+        tag
+    );
+
+    // --------------------------------------------------
+    // TLS record length:
+    //
+    // explicit nonce = 8
+    // ciphertext     = plaintextLength
+    // authentication tag = 16
+    // --------------------------------------------------
+
+    uint16_t recordLength =
+        8 + plaintextLength + 16;
+
+    // --------------------------------------------------
+    // TLS record header
+    // --------------------------------------------------
+
+    if (client.write(contentType) != 1) return false;
+    if (client.write((uint8_t)0x03) != 1) return false;
+    if (client.write((uint8_t)0x03) != 1) return false;
+
+    if (client.write((uint8_t)(recordLength >> 8)) != 1)
+        return false;
+
+    if (client.write((uint8_t)recordLength) != 1)
+        return false;
+
+    // --------------------------------------------------
+    // Explicit nonce = sequence number
+    // --------------------------------------------------
+
+    for (int8_t i = 7; i >= 0; i--)
+    {
+        if (client.write(
+                (uint8_t)(tlsWriteSequence >> (i * 8))
+            ) != 1)
+        {
+            return false;
+        }
+    }
+
+    // --------------------------------------------------
+    // Ciphertext
+    // --------------------------------------------------
+
+    for (uint16_t i = 0; i < plaintextLength; i++)
+    {
+        if (client.write(plaintext[i]) != 1)
+            return false;
+    }
+
+    // --------------------------------------------------
+    // Authentication tag
+    // --------------------------------------------------
+
+    for (uint8_t i = 0; i < 16; i++)
+    {
+        if (client.write(tag[i]) != 1)
+            return false;
+    }
+
+    // --------------------------------------------------
+    // Next encrypted record
+    // --------------------------------------------------
+
+    tlsWriteSequence++;
+
+    return true;
 }
 
 // 256-bit integer helpers Internal representation:
@@ -909,7 +1463,6 @@ void deriveTLSKeys()
     }
 }
 
-EthernetClient client;
 
 struct ECCWorkspace
 {
@@ -2138,7 +2691,7 @@ uint16_t getFreeMemory()
     return stackAddress - heapAddress;
 }
 
-void lcdMemory()
+static void lcdMemory()
 {
     uint16_t freeNow = getFreeMemory();
 
@@ -2150,6 +2703,106 @@ void lcdMemory()
     // Minimum free SRAM
     lcdNumber(minFreeMemory, 45, 180, 0x07E0);
 }
+
+static bool testGCM()
+{
+    // NIST GCM test vector
+    // Key = 16 zero bytes
+    // IV  = 12 zero bytes
+    // Plaintext = 16 zero bytes
+    // AAD = none
+    //
+    // Expected ciphertext:
+    // 0388dace60b6a392f328c2b971b2fe78
+    //
+    // Expected tag:
+    // ab6e47d42cec13bdf53a67b21257bddf
+
+    uint8_t key[16] = {0};
+    uint8_t J0[16] = {0};
+
+    // 96-bit IV || 0x00000001
+    J0[15] = 1;
+
+    uint8_t data[16] = {0};
+
+    // Counter starts at inc32(J0)
+    uint8_t counter[16];
+
+    for (uint8_t i = 0; i < 16; i++)
+        counter[i] = J0[i];
+
+    gcmIncrementCounter(counter);
+
+    // Encrypt plaintext
+    gcmCtrCrypt(key, counter, data, 16);
+
+    uint8_t tag[16];
+
+    gcmMakeTag(
+        key,
+        J0,
+        NULL,
+        0,
+        data,
+        16,
+        tag
+    );
+
+    const uint8_t expectedCiphertext[16] =
+    {
+        0x03, 0x88, 0xda, 0xce,
+        0x60, 0xb6, 0xa3, 0x92,
+        0xf3, 0x28, 0xc2, 0xb9,
+        0x71, 0xb2, 0xfe, 0x78
+    };
+
+    const uint8_t expectedTag[16] =
+    {
+        0xab, 0x6e, 0x47, 0xd4,
+        0x2c, 0xec, 0x13, 0xbd,
+        0xf5, 0x3a, 0x67, 0xb2,
+        0x12, 0x57, 0xbd, 0xdf
+    };
+
+    for (uint8_t i = 0; i < 16; i++)
+    {
+        if (data[i] != expectedCiphertext[i])
+            return false;
+
+        if (tag[i] != expectedTag[i])
+            return false;
+    }
+
+    return true;
+}
+
+static void lcdGCMStatus(bool ok)
+{
+    lcdFillScreen(0x0000);
+
+    if (ok)
+    {
+        // GCM OK
+        lcdNumber(1, 80, 100, 0x07E0);
+    }
+    else
+    {
+        // GCM FAILED
+        lcdNumber(0, 80, 100, 0xF800);
+    }
+}
+
+uint8_t runTLS()
+{
+    // move the current TLS workflow here
+
+    ...
+
+    return 2;
+}
+
+
 void setup()
 {
 
@@ -2174,6 +2827,13 @@ void setup()
   //lcdFillScreen(0x0000);
   //lcdNumber(minFreeMemory, 45, 40, 0xFFFF);
   delay(5000);
+  bool gcmOK = testGCM();
+  lcdGCMStatus(gcmOK);
+  delay(1000);
+  lcdMemory();
+
+
+
   // =======================================================
   // TCP CONNECTION
   // ==========================That's enough debugging. We actually need to optimize things. =============================
@@ -2210,8 +2870,6 @@ void setup()
   Serial.println(sent);
 
   Serial.println(F("ClientHello sent!"));
-
-
 
 
   // =======================================================
@@ -2412,6 +3070,42 @@ void setup()
                   tlsPrfBlock[2] = 0x00;
                   tlsPrfBlock[3] = 0x0C;
 
+                  // -------------------------------------------------------
+                  // Send ChangeCipherSpec
+                  // -------------------------------------------------------
+
+                  if (!tlsSendChangeCipherSpec())
+                  {
+                      while (1);
+                  }
+
+                  // -------------------------------------------------------
+                  // First encrypted record uses sequence number 0
+                  // -------------------------------------------------------
+
+                  tlsWriteSequence = 0;
+
+                  // -------------------------------------------------------
+                  // Encrypt and send Client Finished
+                  // -------------------------------------------------------
+
+                  if (!tlsSendGCMRecord(
+                          0x16,          // Handshake
+                          tlsPrfBlock,
+                          16             // Finished handshake = 4 + 12
+                      ))
+                  {
+                      while (1);
+                  }
+
+                  // Add Client Finished to handshake transcript
+                  // -------------------------------------------------------
+
+                  for (uint8_t i = 0; i < 16; i++)
+                      tlsTranscriptUpdateByte(tlsPrfBlock[i]);
+                      
+
+
                   Serial.println(F("M237")); // Client Finished handshake
 
                   for (uint8_t i = 0; i < 16; i++)
@@ -2422,44 +3116,6 @@ void setup()
                       Serial.print(tlsPrfBlock[i], HEX);
                   }
                   Serial.println();
-
-                  // Temporary
-
-                  // -------------------------------------------------------
-                  // M238 — AES-128 test
-                  // -------------------------------------------------------
-
-                  for (uint8_t i = 0; i < 16; i++)
-                  {
-                      tlsPrfBlock[i] =
-                          pgm_read_byte(&aesTestPlaintext[i]);
-                  }
-
-                  uint8_t aesTestKeyRAM[16];
-
-                  for (uint8_t i = 0; i < 16; i++)
-                  {
-                      aesTestKeyRAM[i] =
-                          pgm_read_byte(&aesTestKey[i]);
-                  }
-
-                  aes128EncryptBlock(
-                      aesTestKeyRAM,
-                      tlsPrfBlock
-                  );
-
-                  Serial.println(F("M238")); // AES-128 test ciphertext
-
-                  for (uint8_t i = 0; i < 16; i++)
-                  {
-                      if (tlsPrfBlock[i] < 16)
-                          Serial.print('0');
-
-                      Serial.print(tlsPrfBlock[i], HEX);
-                  }
-
-                  Serial.println();
-
                   Serial.println(F("M239")); // SHA-256 abc test
 
                   SHA256Context shaTestContext;
