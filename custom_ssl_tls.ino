@@ -2,10 +2,6 @@
 #include <Ethernet.h>
 #include <avr/pgmspace.h>
 #define DEBUG_TLS_ALERTS 0
-byte mac[] = {
-  0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED
-};
-
 struct U256
 {
   uint8_t v[32];
@@ -15,11 +11,212 @@ struct Point
   U256 x;
   U256 y;
 };
+byte mac[] = {
+  0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED
+};
+
+struct SHA256Context
+{
+    uint32_t state[8];
+    uint64_t bitCount;
+    uint8_t buffer[64];
+};
+
+const uint8_t aesSBox[256] PROGMEM =
+{
+    0x63, 0x7C, 0x77, 0x7B, 0xF2, 0x6B, 0x6F, 0xC5,
+    0x30, 0x01, 0x67, 0x2B, 0xFE, 0xD7, 0xAB, 0x76,
+    0xCA, 0x82, 0xC9, 0x7D, 0xFA, 0x59, 0x47, 0xF0,
+    0xAD, 0xD4, 0xA2, 0xAF, 0x9C, 0xA4, 0x72, 0xC0,
+    0xB7, 0xFD, 0x93, 0x26, 0x36, 0x3F, 0xF7, 0xCC,
+    0x34, 0xA5, 0xE5, 0xF1, 0x71, 0xD8, 0x31, 0x15,
+    0x04, 0xC7, 0x23, 0xC3, 0x18, 0x96, 0x05, 0x9A,
+    0x07, 0x12, 0x80, 0xE2, 0xEB, 0x27, 0xB2, 0x75,
+    0x09, 0x83, 0x2C, 0x1A, 0x1B, 0x6E, 0x5A, 0xA0,
+    0x52, 0x3B, 0xD6, 0xB3, 0x29, 0xE3, 0x2F, 0x84,
+    0x53, 0xD1, 0x00, 0xED, 0x20, 0xFC, 0xB1, 0x5B,
+    0x6A, 0xCB, 0xBE, 0x39, 0x4A, 0x4C, 0x58, 0xCF,
+    0xD0, 0xEF, 0xAA, 0xFB, 0x43, 0x4D, 0x33, 0x85,
+    0x45, 0xF9, 0x02, 0x7F, 0x50, 0x3C, 0x9F, 0xA8,
+    0x51, 0xA3, 0x40, 0x8F, 0x92, 0x9D, 0x38, 0xF5,
+    0xBC, 0xB6, 0xDA, 0x21, 0x10, 0xFF, 0xF3, 0xD2,
+    0xCD, 0x0C, 0x13, 0xEC, 0x5F, 0x97, 0x44, 0x17,
+    0xC4, 0xA7, 0x7E, 0x3D, 0x64, 0x5D, 0x19, 0x73,
+    0x60, 0x81, 0x4F, 0xDC, 0x22, 0x2A, 0x90, 0x88,
+    0x46, 0xEE, 0xB8, 0x14, 0xDE, 0x5E, 0x0B, 0xDB,
+    0xE0, 0x32, 0x3A, 0x0A, 0x49, 0x06, 0x24, 0x5C,
+    0xC2, 0xD3, 0xAC, 0x62, 0x91, 0x95, 0xE4, 0x79,
+    0xE7, 0xC8, 0x37, 0x6D, 0x8D, 0xD5, 0x4E, 0xA9,
+    0x6C, 0x56, 0xF4, 0xEA, 0x65, 0x7A, 0xAE, 0x08,
+    0xBA, 0x78, 0x25, 0x2E, 0x1C, 0xA6, 0xB4, 0xC6,
+    0xE8, 0xDD, 0x74, 0x1F, 0x4B, 0xBD, 0x8B, 0x8A,
+    0x70, 0x3E, 0xB5, 0x66, 0x48, 0x03, 0xF6, 0x0E,
+    0x61, 0x35, 0x57, 0xB9, 0x86, 0xC1, 0x1D, 0x9E,
+    0xE1, 0xF8, 0x98, 0x11, 0x69, 0xD9, 0x8E, 0x94,
+    0x9B, 0x1E, 0x87, 0xE9, 0xCE, 0x55, 0x28, 0xDF,
+    0x8C, 0xA1, 0x89, 0x0D, 0xBF, 0xE6, 0x42, 0x68,
+    0x41, 0x99, 0x2D, 0x0F, 0xB0, 0x54, 0xBB, 0x16
+};
+
+
+uint8_t aesXtime(uint8_t value)
+{
+    return (uint8_t)(
+        (value << 1) ^
+        ((value & 0x80) ? 0x1B : 0x00)
+    );
+}
+
+
+void aesAddRoundKey(    uint8_t block[16],    const uint8_t roundKey[16])
+{
+    for (uint8_t i = 0; i < 16; i++)
+        block[i] ^= roundKey[i];
+}
+
+
+void aesSubBytes(uint8_t block[16])
+{
+    for (uint8_t i = 0; i < 16; i++)
+        block[i] =
+            pgm_read_byte(&aesSBox[block[i]]);
+}
+
+
+void aesShiftRows(uint8_t block[16])
+{
+    uint8_t temp;
+
+    // Row 1: left rotate by 1.
+    temp = block[1];
+    block[1]  = block[5];
+    block[5]  = block[9];
+    block[9]  = block[13];
+    block[13] = temp;
+
+    // Row 2: left rotate by 2.
+    temp = block[2];
+    block[2]  = block[10];
+    block[10] = temp;
+
+    temp = block[6];
+    block[6]  = block[14];
+    block[14] = temp;
+
+    // Row 3: left rotate by 3.
+    temp = block[15];
+    block[15] = block[11];
+    block[11] = block[7];
+    block[7]  = block[3];
+    block[3]  = temp;
+}
+
+
+void aesMixColumns(uint8_t block[16])
+{
+    for (uint8_t i = 0; i < 16; i += 4)
+    {
+        uint8_t a = block[i];
+        uint8_t b = block[i + 1];
+        uint8_t c = block[i + 2];
+        uint8_t d = block[i + 3];
+
+        uint8_t ab = aesXtime(a);
+        uint8_t bc = aesXtime(b);
+        uint8_t cc = aesXtime(c);
+        uint8_t dc = aesXtime(d);
+
+        block[i] =
+            ab ^ (bc ^ b) ^ c ^ d;
+
+        block[i + 1] =
+            a ^ bc ^ (cc ^ c) ^ d;
+
+        block[i + 2] =
+            a ^ b ^ cc ^ (dc ^ d);
+
+        block[i + 3] =
+            (ab ^ a) ^ b ^ c ^ dc;
+    }
+}
+
+void aesExpandRoundKey(    uint8_t roundKey[16],    uint8_t round)
+{
+    uint8_t t0 = roundKey[13];
+    uint8_t t1 = roundKey[14];
+    uint8_t t2 = roundKey[15];
+    uint8_t t3 = roundKey[12];
+
+    t0 = pgm_read_byte(&aesSBox[t0]);
+    t1 = pgm_read_byte(&aesSBox[t1]);
+    t2 = pgm_read_byte(&aesSBox[t2]);
+    t3 = pgm_read_byte(&aesSBox[t3]);
+
+    uint8_t rcon = 1;
+
+    for (uint8_t i = 1; i < round; i++)
+        rcon = aesXtime(rcon);
+
+    t0 ^= rcon;
+
+    roundKey[0] ^= t0;
+    roundKey[1] ^= t1;
+    roundKey[2] ^= t2;
+    roundKey[3] ^= t3;
+
+    for (uint8_t i = 4; i < 16; i++)
+        roundKey[i] ^= roundKey[i - 4];
+}
+
+void aes128EncryptBlock(    const uint8_t key[16],    uint8_t block[16])
+{
+    uint8_t roundKey[16];
+
+    for (uint8_t i = 0; i < 16; i++)
+        roundKey[i] = key[i];
+
+    // Round 0.
+    aesAddRoundKey(block, roundKey);
+
+    // Rounds 1..9.
+    for (uint8_t round = 1; round <= 9; round++)
+    {
+        aesExpandRoundKey(roundKey, round);
+
+        aesSubBytes(block);
+        aesShiftRows(block);
+        aesMixColumns(block);
+        aesAddRoundKey(block, roundKey);
+    }
+
+    // Round 10.
+    aesExpandRoundKey(roundKey, 10);
+
+    aesSubBytes(block);
+    aesShiftRows(block);
+    aesAddRoundKey(block, roundKey);
+}
+
+const uint8_t aesTestKey[16] PROGMEM =
+{
+    0x00, 0x01, 0x02, 0x03,
+    0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0A, 0x0B,
+    0x0C, 0x0D, 0x0E, 0x0F
+};
+
+const uint8_t aesTestPlaintext[16] PROGMEM =
+{
+    0x00, 0x11, 0x22, 0x33,
+    0x44, 0x55, 0x66, 0x77,
+    0x88, 0x99, 0xAA, 0xBB,
+    0xCC, 0xDD, 0xEE, 0xFF
+};
+const uint8_t shaTestData[] PROGMEM = "abc";
+
 U256 ecdheSharedSecret;
 uint8_t serverRandom[32];
 uint16_t selectedCipherSuite = 0;
-U256 tlsMasterSecretPart1;
-U256 tlsMasterSecretPart2;
 uint8_t tlsMasterSecret[48];
 uint8_t clientWriteKey[16];
 uint8_t serverWriteKey[16];
@@ -29,20 +226,39 @@ uint8_t serverWriteIV[4];
 uint8_t clientRandom[32];
 uint8_t tlsKeyBlock[40];
 
+uint8_t tlsPrfSeed[64]; //  also used instead of  masterSeed[64] keySeed[64]; for deriveTLSKeys
+uint8_t tlsPrfA[32];
+uint8_t tlsPrfInput[109];
+uint8_t tlsPrfBlock[32];
 
-struct SHA256Context
+
+uint8_t tlsHmacKeyBlock[64];
+uint8_t tlsHmacInnerHash[32];
+SHA256Context tlsHmacContext;
+
+
+bool tlsTranscriptActive = false;
+uint8_t tlsTranscriptHash[32];
+bool tlsTranscriptRecord = false;
+
+void tlsTranscriptInit()
 {
-  uint32_t state[8];
-  uint64_t bitCount;
-  uint8_t buffer[64];
-};
+    sha256Init(tlsHmacContext);
+}
 
+void tlsTranscriptUpdateByte(uint8_t value)
+{
+    sha256UpdateByte(tlsHmacContext, value);
+}
+
+void tlsTranscriptFinal(uint8_t digest[32])
+{
+    sha256Final(tlsHmacContext, digest);
+}
 
 // 256-bit integer helpers Internal representation:
 //   v[0]  = least significant byte    v[31] = most significant byte
 // TLS/network values are normally big-endian, so conversion functions are provided separately.
-
-
 void zero256(U256 &a)
 {
   for (int i = 0; i < 32; i++)
@@ -270,7 +486,6 @@ void print256(const U256 &value)
   Serial.println();
 }
 
-
 const uint32_t SHA256_K[64] PROGMEM =
 {
   0x428A2F98UL, 0x71374491UL, 0xB5C0FBCFUL, 0xE9B5DBA5UL,
@@ -339,79 +554,92 @@ void sha256Init(SHA256Context &ctx)
 
   ctx.bitCount = 0;
 }
-
-void sha256Transform(SHA256Context &ctx, const uint8_t *data)
+uint32_t sha256ScheduleWord(    SHA256Context &ctx,    uint8_t index)
 {
-  uint32_t w[64];
+    uint8_t j = (index & 15) * 4;
 
-  for (uint8_t i = 0; i < 16; i++)
-  {
-    uint8_t j = i * 4;
-
-    w[i] =
-        ((uint32_t)data[j] << 24) |
-        ((uint32_t)data[j + 1] << 16) |
-        ((uint32_t)data[j + 2] << 8) |
-        ((uint32_t)data[j + 3]);
-  }
-
-  for (uint8_t i = 16; i < 64; i++)
-  {
-    w[i] =
-        sha256SmallSigma1(w[i - 2]) +
-        w[i - 7] +
-        sha256SmallSigma0(w[i - 15]) +
-        w[i - 16];
-  }
-
-  uint32_t a = ctx.state[0];
-  uint32_t b = ctx.state[1];
-  uint32_t c = ctx.state[2];
-  uint32_t d = ctx.state[3];
-  uint32_t e = ctx.state[4];
-  uint32_t f = ctx.state[5];
-  uint32_t g = ctx.state[6];
-  uint32_t h = ctx.state[7];
-
-  for (uint8_t i = 0; i < 64; i++)
-  {
-    uint32_t k = pgm_read_dword(&SHA256_K[i]);
-
-    uint32_t t1 =
-        h +
-        sha256BigSigma1(e) +
-        sha256Ch(e, f, g) +
-        k +
-        w[i];
-
-    uint32_t t2 =
-        sha256BigSigma0(a) +
-        sha256Maj(a, b, c);
-
-    h = g;
-    g = f;
-    f = e;
-    e = d + t1;
-    d = c;
-    c = b;
-    b = a;
-    a = t1 + t2;
-  }
-
-  ctx.state[0] += a;
-  ctx.state[1] += b;
-  ctx.state[2] += c;
-  ctx.state[3] += d;
-  ctx.state[4] += e;
-  ctx.state[5] += f;
-  ctx.state[6] += g;
-  ctx.state[7] += h;
+    return
+        ((uint32_t)ctx.buffer[j] << 24) |
+        ((uint32_t)ctx.buffer[j + 1] << 16) |
+        ((uint32_t)ctx.buffer[j + 2] << 8) |
+        ((uint32_t)ctx.buffer[j + 3]);
 }
 
-void sha256Update(
-    SHA256Context &ctx,
-    const uint8_t *data,
-    uint16_t length)
+void sha256Transform(SHA256Context &ctx)
+{
+    uint32_t a = ctx.state[0];
+    uint32_t b = ctx.state[1];
+    uint32_t c = ctx.state[2];
+    uint32_t d = ctx.state[3];
+    uint32_t e = ctx.state[4];
+    uint32_t f = ctx.state[5];
+    uint32_t g = ctx.state[6];
+    uint32_t h = ctx.state[7];
+
+    for (uint8_t i = 0; i < 64; i++)
+    {
+        uint32_t wi;
+
+        if (i < 16)
+        {
+            wi = sha256ScheduleWord(ctx, i);
+        }
+        else
+        {
+            uint32_t value =
+                sha256SmallSigma1(
+                    sha256ScheduleWord(ctx, (i - 2) & 15)
+                ) +
+                sha256ScheduleWord(ctx, (i - 7) & 15) +
+                sha256SmallSigma0(
+                    sha256ScheduleWord(ctx, (i - 15) & 15)
+                ) +
+                sha256ScheduleWord(ctx, i & 15);
+
+            uint8_t j = (i & 15) * 4;
+
+            ctx.buffer[j]     = (uint8_t)(value >> 24);
+            ctx.buffer[j + 1] = (uint8_t)(value >> 16);
+            ctx.buffer[j + 2] = (uint8_t)(value >> 8);
+            ctx.buffer[j + 3] = (uint8_t)value;
+
+            wi = value;
+        }
+
+        uint32_t k = pgm_read_dword(&SHA256_K[i]);
+
+        uint32_t t1 =
+            h +
+            sha256BigSigma1(e) +
+            sha256Ch(e, f, g) +
+            k +
+            wi;
+
+        uint32_t t2 =
+            sha256BigSigma0(a) +
+            sha256Maj(a, b, c);
+
+        h = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+    }
+
+    ctx.state[0] += a;
+    ctx.state[1] += b;
+    ctx.state[2] += c;
+    ctx.state[3] += d;
+    ctx.state[4] += e;
+    ctx.state[5] += f;
+    ctx.state[6] += g;
+    ctx.state[7] += h;
+}
+
+void sha256Update(    SHA256Context &ctx,    const uint8_t *data,    uint16_t length)
 {
   uint16_t index =
       (uint16_t)((ctx.bitCount >> 3) & 0x3F);
@@ -424,22 +652,18 @@ void sha256Update(
 
     if (index == 64)
     {
-      sha256Transform(ctx, ctx.buffer);
+      sha256Transform(ctx);
       index = 0;
     }
   }
 }
 
-void sha256UpdateByte(
-    SHA256Context &ctx,
-    uint8_t value)
+void sha256UpdateByte(    SHA256Context &ctx,    uint8_t value)
 {
   sha256Update(ctx, &value, 1);
 }
 
-void sha256Final(
-    SHA256Context &ctx,
-    uint8_t digest[32])
+void sha256Final(    SHA256Context &ctx,    uint8_t digest[32])
 {
   uint16_t index =
       (uint16_t)((ctx.bitCount >> 3) & 0x3F);
@@ -451,7 +675,7 @@ void sha256Final(
     while (index < 64)
       ctx.buffer[index++] = 0;
 
-    sha256Transform(ctx, ctx.buffer);
+    sha256Transform(ctx);
     index = 0;
   }
 
@@ -465,7 +689,7 @@ void sha256Final(
     ctx.buffer[index++] = (uint8_t)(bits >> (i * 8));
   }
 
-  sha256Transform(ctx, ctx.buffer);
+  sha256Transform(ctx);
 
   for (uint8_t i = 0; i < 8; i++)
   {
@@ -484,50 +708,79 @@ void sha256Final(
 }
 
 
-void hmacSha256(const uint8_t *key, uint8_t keyLength, const uint8_t *data, uint16_t dataLength, uint8_t output[32])
+void hmacSha256(    const uint8_t *key,    uint8_t keyLength,    const uint8_t *data,    uint16_t dataLength,    uint8_t output[32])
 {
-  uint8_t keyBlock[64];
+    for (uint8_t i = 0; i < 64; i++)
+        tlsHmacKeyBlock[i] = 0;
 
-  for (uint8_t i = 0; i < 64; i++)
-    keyBlock[i] = 0;
+    if (keyLength > 64)
+    {
+        sha256Init(tlsHmacContext);
+        sha256Update(
+            tlsHmacContext,
+            key,
+            keyLength
+        );
+        sha256Final(
+            tlsHmacContext,
+            tlsHmacInnerHash
+        );
 
-  if (keyLength > 64)
-  {
-    SHA256Context keyHash;
-    uint8_t digest[32];
+        for (uint8_t i = 0; i < 32; i++)
+            tlsHmacKeyBlock[i] =
+                tlsHmacInnerHash[i];
+    }
+    else
+    {
+        for (uint8_t i = 0; i < keyLength; i++)
+            tlsHmacKeyBlock[i] = key[i];
+    }
 
-    sha256Init(keyHash);
-    sha256Update(keyHash, key, keyLength);
-    sha256Final(keyHash, digest);
+    // H(K) XOR ipad
+    for (uint8_t i = 0; i < 64; i++)
+        tlsHmacKeyBlock[i] ^= 0x36;
 
-    for (uint8_t i = 0; i < 32; i++)
-      keyBlock[i] = digest[i];
-  }
-  else
-  {
-    for (uint8_t i = 0; i < keyLength; i++)
-      keyBlock[i] = key[i];
-  }
+    sha256Init(tlsHmacContext);
 
-  SHA256Context ctx;
+    sha256Update(
+        tlsHmacContext,
+        tlsHmacKeyBlock,
+        64
+    );
 
-  for (uint8_t i = 0; i < 64; i++)
-    keyBlock[i] ^= 0x36;
+    sha256Update(
+        tlsHmacContext,
+        data,
+        dataLength
+    );
 
-  sha256Init(ctx);
-  sha256Update(ctx, keyBlock, 64);
-  sha256Update(ctx, data, dataLength);
+    sha256Final(
+        tlsHmacContext,
+        tlsHmacInnerHash
+    );
 
-  uint8_t innerHash[32];
-  sha256Final(ctx, innerHash);
+    // Convert ipad into opad.
+    for (uint8_t i = 0; i < 64; i++)
+        tlsHmacKeyBlock[i] ^= 0x36 ^ 0x5C;
 
-  for (uint8_t i = 0; i < 64; i++)
-    keyBlock[i] ^= 0x36 ^ 0x5C;
+    sha256Init(tlsHmacContext);
 
-  sha256Init(ctx);
-  sha256Update(ctx, keyBlock, 64);
-  sha256Update(ctx, innerHash, 32);
-  sha256Final(ctx, output);
+    sha256Update(
+        tlsHmacContext,
+        tlsHmacKeyBlock,
+        64
+    );
+
+    sha256Update(
+        tlsHmacContext,
+        tlsHmacInnerHash,
+        32
+    );
+
+    sha256Final(
+        tlsHmacContext,
+        output
+    );
 }
 
 void tlsPrfSha256(
@@ -540,155 +793,123 @@ void tlsPrfSha256(
     uint8_t *output,
     uint16_t outputLength)
 {
-    uint8_t labelSeed[64];
-    uint8_t A[32];
-    uint8_t nextA[32];
-    uint8_t input[96];
-    uint8_t block[32];
+    uint8_t labelSeedLength = labelLength + seedLength;
 
-    uint8_t labelSeedLength =
-        labelLength + seedLength;
-
+    // Build label + seed in tlsPrfInput.
     for (uint8_t i = 0; i < labelLength; i++)
-        labelSeed[i] = label[i];
+        tlsPrfInput[i] = pgm_read_byte(&label[i]);
 
     for (uint8_t i = 0; i < seedLength; i++)
-        labelSeed[labelLength + i] = seed[i];
+        tlsPrfInput[labelLength + i] = seed[i];
 
-    /*
-     * A(1) = HMAC(secret, label + seed)
-     */
+    // A(1) = HMAC(secret, label + seed)
     hmacSha256(
         secret,
         secretLength,
-        labelSeed,
+        tlsPrfInput,
         labelSeedLength,
-        A
+        tlsPrfA
     );
 
     uint16_t produced = 0;
 
     while (produced < outputLength)
     {
-        /*
-         * P_hash block:
-         *
-         * HMAC(secret, A(i) + label + seed)
-         */
-
+        // A(i) + label + seed
         for (uint8_t i = 0; i < 32; i++)
-            input[i] = A[i];
+            tlsPrfInput[i] = tlsPrfA[i];
 
-        for (uint8_t i = 0; i < labelSeedLength; i++)
-            input[32 + i] = labelSeed[i];
+        for (uint8_t i = 0; i < labelLength; i++)
+            tlsPrfInput[32 + i] =
+                pgm_read_byte(&label[i]);
+
+        for (uint8_t i = 0; i < seedLength; i++)
+            tlsPrfInput[32 + labelLength + i] =
+                seed[i];
 
         hmacSha256(
             secret,
             secretLength,
-            input,
+            tlsPrfInput,
             32 + labelSeedLength,
-            block
+            tlsPrfBlock
         );
 
-        uint16_t remaining =
-            outputLength - produced;
-
+        uint16_t remaining = outputLength - produced;
         uint8_t copyLength =
             remaining < 32 ? remaining : 32;
 
         for (uint8_t i = 0; i < copyLength; i++)
-            output[produced + i] = block[i];
+            output[produced + i] = tlsPrfBlock[i];
 
         produced += copyLength;
 
-        /*
-         * A(i+1) = HMAC(secret, A(i))
-         */
+        // A(i+1) = HMAC(secret, A(i))
         hmacSha256(
             secret,
             secretLength,
-            A,
+            tlsPrfA,
             32,
-            nextA
+            tlsPrfBlock
         );
 
         for (uint8_t i = 0; i < 32; i++)
-            A[i] = nextA[i];
+            tlsPrfA[i] = tlsPrfBlock[i];
     }
 }
-
 void deriveTLSKeys()
 {
-    uint8_t masterSeed[64];
-    uint8_t keySeed[64];
-
-    /*
-     * master_secret =
-     * PRF(pre_master_secret,
-     *     "master secret",
-     *     ClientHello.random + ServerHello.random)
-     */
-
+    // client_random || server_random
     for (uint8_t i = 0; i < 32; i++)
     {
-        masterSeed[i] = clientRandom[i];
-        masterSeed[32 + i] = serverRandom[i];
+        tlsPrfSeed[i] = clientRandom[i];
+        tlsPrfSeed[32 + i] = serverRandom[i];
     }
 
-    const uint8_t masterLabel[] = "master secret";
+    const uint8_t masterLabel[] PROGMEM = "master secret";
 
     tlsPrfSha256(
         ecdheSharedSecret.v,
         32,
         masterLabel,
         13,
-        masterSeed,
+        tlsPrfSeed,
         64,
         tlsMasterSecret,
         48
     );
 
-    /*
-     * key_block =
-     * PRF(master_secret,
-     *     "key expansion",
-     *     ServerHello.random + ClientHello.random)
-     */
-
+    // server_random || client_random
     for (uint8_t i = 0; i < 32; i++)
     {
-        keySeed[i] = serverRandom[i];
-        keySeed[32 + i] = clientRandom[i];
+        tlsPrfSeed[i] = serverRandom[i];
+        tlsPrfSeed[32 + i] = clientRandom[i];
     }
 
-    const uint8_t keyLabel[] = "key expansion";
+    const uint8_t keyLabel[] PROGMEM = "key expansion";
 
     tlsPrfSha256(
         tlsMasterSecret,
         48,
         keyLabel,
         13,
-        keySeed,
+        tlsPrfSeed,
         64,
         tlsKeyBlock,
         40
     );
 
-    /*
-     * Split key_block
-     */
-
     for (uint8_t i = 0; i < 16; i++)
+    {
         clientWriteKey[i] = tlsKeyBlock[i];
-
-    for (uint8_t i = 0; i < 16; i++)
         serverWriteKey[i] = tlsKeyBlock[16 + i];
+    }
 
     for (uint8_t i = 0; i < 4; i++)
+    {
         clientWriteIV[i] = tlsKeyBlock[32 + i];
-
-    for (uint8_t i = 0; i < 4; i++)
         serverWriteIV[i] = tlsKeyBlock[36 + i];
+    }
 }
 
 EthernetClient client;
@@ -712,14 +933,9 @@ struct PointProjective
   U256 z;
 };
 
-
-
 ECCWorkspace ecc;
-
 Point ecdheClientPublic;
 U256 ecdhePrivate;
-
-
 void pointDoubleProjective(PointProjective &p);
 void pointDoubleProjective(PointProjective &p)
 {
@@ -780,14 +996,25 @@ void printMemory()
 
   char stackVariable;
 
+  Serial.print(F("M242")); // SRAM addresses
+
+  Serial.print(F(" stack=0x"));
+  Serial.print((uint16_t)&stackVariable, HEX);
+
+  Serial.print(F(" heap=0x"));
+  Serial.print(
+      (uint16_t)(__brkval ? __brkval : &__heap_start),
+      HEX
+  );
+
+  Serial.print(F(" free="));
+
   int freeMemory =
       &stackVariable -
       (__brkval ? __brkval : &__heap_start);
 
-  Serial.print(F("Free SRAM: "));
   Serial.println(freeMemory);
 }
-
 
 // Fixed TLS 1.2 ClientHello.
 // Stored in Flash instead of SRAM.
@@ -863,10 +1090,7 @@ const uint8_t clientHello[] PROGMEM =
 
 const uint16_t clientHelloLength = sizeof(clientHello);
 
-void printHexPROGMEM(
-  const uint8_t *buffer,
-  uint16_t length
-)
+void printHexPROGMEM(  const uint8_t *buffer,  uint16_t length)
 {
   for (uint16_t i = 0; i < length; i++)
   {
@@ -899,9 +1123,17 @@ size_t sendClientHello()
     uint8_t value = pgm_read_byte(&clientHello[i]);
 
     if (client.write(value) == 1)
-      sent++;
+    {
+        sent++;
+
+        // Skip TLS record header; hash handshake bytes only.
+        if (i >= 5)
+            tlsTranscriptUpdateByte(value);
+    }
     else
-      break;
+    {
+        break;
+    }
   }
 
   return sent;
@@ -941,6 +1173,9 @@ bool readTLSByte(uint8_t &value)
   }
 
   value = client.read();
+
+  if (tlsTranscriptRecord)
+    tlsTranscriptUpdateByte(value);
   return true;
 }
 
@@ -1527,7 +1762,6 @@ void pointAddAffineProjectiveProgmem(PointProjective &result, const uint8_t *px,
   modSub256(result.y, ecc.temp2, ecc.temp1);
 }
 
-
 //void pointScalarMultiplyProjective(PointProjective &result, const U256 &scalar);
 // void pointScalarMultiplyProjectiveOld(PointProjective &result, const U256 &scalar)
 // {
@@ -1565,14 +1799,8 @@ void pointAddAffineProjectiveProgmem(PointProjective &result, const uint8_t *px,
 //     }
 //   }
 // }
-void __attribute__((noinline)) pointScalarMultiplyProjective(
-    PointProjective &result,
-    const U256 &scalar,
-    const Point &point);
-void __attribute__((noinline)) pointScalarMultiplyProjective(
-    PointProjective &result,
-    const U256 &scalar,
-    const Point &point)
+void __attribute__((noinline)) pointScalarMultiplyProjective(    PointProjective &result,    const U256 &scalar,    const Point &point);
+void __attribute__((noinline)) pointScalarMultiplyProjective(    PointProjective &result,    const U256 &scalar,    const Point &point)
 {
   zero256(result.x);
   zero256(result.y);
@@ -1611,6 +1839,45 @@ void __attribute__((noinline)) pointScalarMultiplyProjective(
   }
 }
 
+void __attribute__((noinline)) pointScalarMultiplyGeneratorProjective(
+    PointProjective &result,
+    const U256 &scalar)
+{
+    zero256(result.x);
+    zero256(result.y);
+    zero256(result.z);
+
+    bool started = false;
+
+    for (int8_t byteIndex = 31; byteIndex >= 0; byteIndex--)
+    {
+        uint8_t value = scalar.v[byteIndex];
+
+        for (int8_t bit = 7; bit >= 0; bit--)
+        {
+            if (!started)
+            {
+                if ((value & (1 << bit)) == 0)
+                    continue;
+
+                pointSetProjectiveGenerator(result);
+                started = true;
+                continue;
+            }
+
+            pointDoubleProjective(result);
+
+            if (value & (1 << bit))
+            {
+                pointAddAffineProjectiveProgmem(
+                    result,
+                    P256_GX_BE,
+                    P256_GY_BE);
+            }
+        }
+    }
+}
+
 void pointProjectiveToAffineX(U256 &result, const PointProjective &p);
 void pointProjectiveToAffineX(U256 &result, const PointProjective &p)
 {
@@ -1622,7 +1889,6 @@ void pointProjectiveToAffineX(U256 &result, const PointProjective &p)
   modMul256(result, p.x, ecc.temp2);
 }
 
-
 void testScalarMultiplication()
 {
   Serial.println(F("=== Scalar multiplication test ==="));
@@ -1630,25 +1896,14 @@ void testScalarMultiplication()
   U256 k;
   zero256(k);
 
-  // k = 3
-  //k.v[0] = 5;
+  // k = 0x010101...0101
   for (int i = 0; i < 32; i++)
     k.v[i] = 0x01;
-
-  Point g;
-
-  // Load P-256 generator from existing PROGMEM constants.
-  // The constants are stored big-endian, while U256 is little-endian.
-  for (int i = 0; i < 32; i++)
-  {
-    g.x.v[i] = pgm_read_byte(&P256_GX_BE[31 - i]);
-    g.y.v[i] = pgm_read_byte(&P256_GY_BE[31 - i]);
-  }
 
   PointProjective r;
 
   // r = k × G
-  pointScalarMultiplyProjective(r, k, g);
+  pointScalarMultiplyGeneratorProjective(r, k);
 
   U256 x;
 
@@ -1744,9 +1999,8 @@ void setup()
 {
   Serial.begin(115200);
   delay(1000);
-
+  Serial.println(F("M243")); // setup entered
   Serial.println(F("Starting Ethernet..."));
-
   if (Ethernet.begin(mac) == 0)
   {
     Serial.println(F("DHCP failed!"));
@@ -1756,6 +2010,8 @@ void setup()
 
     return;
   }
+  Serial.println(F("M245")); // after Ethernet.begin
+  printMemory();
   delay(1000);
 
   Serial.print(F("IP address: "));
@@ -1764,19 +2020,19 @@ void setup()
 
   // =======================================================
   // TCP CONNECTION
-  // =======================================================
-
-  Serial.println();
-
-  Serial.println(
-    "Connecting to api.coinpaprika.com:443..."
-  );
-  if (!client.connect("api.binance.com", 443))
-  //if (!client.connect("api.coinpaprika.com", 443))
+  // ==========================That's enough debugging. We actually need to optimize things. =============================
+  Serial.println(F("M246")); // before TCP connect
+  Serial.println(F("Connecting to api.coinpaprika.com:443..."));
+  if (!client.connect(F("api.coinpaprika.com"), 443))
   {
     Serial.println(F("TCP connection failed!"));
     return;
   }
+    Serial.println(F("M248")); // DNS server
+  Serial.print(F("DNS: "));
+  Serial.println(Ethernet.dnsServerIP());
+
+  Serial.println(F("M247")); // TCP connect returned
   printMemory();
   Serial.println(F("TCP connection established!"));
 
@@ -1803,7 +2059,7 @@ void setup()
   Serial.println();
 
   Serial.println(F("Sending ClientHello..."));
-
+  tlsTranscriptInit();
   size_t sent = sendClientHello();
 
   Serial.print(F("Bytes sent: "));
@@ -1835,6 +2091,7 @@ void setup()
 
       while (client.connected())
       {
+        tlsTranscriptRecord = false;
         uint8_t contentType;
         uint8_t versionMajor;
         uint8_t versionMinor;
@@ -1850,6 +2107,8 @@ void setup()
           Serial.println(F("Could not read TLS record header."));
           break;
         }
+
+        tlsTranscriptRecord =  (contentType == 0x16);
 
 
         Serial.println();
@@ -1946,6 +2205,147 @@ void setup()
               else
               {
                   Serial.println(F("ClientKeyExchange sent!"));
+                  // -------------------------------------------------------
+                  // Finish handshake transcript
+                  // -------------------------------------------------------
+                  // ClientKeyExchange handshake message:
+                  // 10 00 00 42 41 04 X[32] Y[32]
+                  tlsTranscriptUpdateByte(0x10);
+                  tlsTranscriptUpdateByte(0x00);
+                  tlsTranscriptUpdateByte(0x00);
+                  tlsTranscriptUpdateByte(0x42);
+                  tlsTranscriptUpdateByte(0x41);
+                  tlsTranscriptUpdateByte(0x04);
+
+                  for (int8_t i = 31; i >= 0; i--)
+                      tlsTranscriptUpdateByte(ecdheClientPublic.x.v[i]);
+
+                  for (int8_t i = 31; i >= 0; i--)
+                      tlsTranscriptUpdateByte(ecdheClientPublic.y.v[i]);
+                  tlsTranscriptFinal(tlsTranscriptHash);
+
+                  Serial.println(F("M235")); // Transcript SHA-256
+
+                  for (uint8_t i = 0; i < 32; i++)
+                  {
+                      if (tlsTranscriptHash[i] < 16)
+                          Serial.print('0');
+
+                      Serial.print(tlsTranscriptHash[i], HEX);
+                  }
+
+                  Serial.println();
+
+                  // -------------------------------------------------------
+                  // M236 — Client Finished verify_data
+                  // -------------------------------------------------------
+
+                  const uint8_t clientFinishedLabel[] PROGMEM = "client finished";
+
+                  tlsPrfSha256(
+                      tlsMasterSecret,
+                      48,
+                      clientFinishedLabel,
+                      15,
+                      tlsTranscriptHash,
+                      32,
+                      tlsPrfBlock,
+                      12
+                  );
+
+                  Serial.println(F("M236")); //"Client Finished verify_data: "
+
+                  for (uint8_t i = 0; i < 12; i++)
+                  {
+                      if (tlsPrfBlock[i] < 16)
+                          Serial.print('0');
+
+                      Serial.print(tlsPrfBlock[i], HEX);
+                  }
+
+                  Serial.println();
+
+                  for (int8_t i = 11; i >= 0; i--)
+                      tlsPrfBlock[4 + i] = tlsPrfBlock[i];
+
+                  tlsPrfBlock[0] = 0x14;
+                  tlsPrfBlock[1] = 0x00;
+                  tlsPrfBlock[2] = 0x00;
+                  tlsPrfBlock[3] = 0x0C;
+
+                  Serial.println(F("M237")); // Client Finished handshake
+
+                  for (uint8_t i = 0; i < 16; i++)
+                  {
+                      if (tlsPrfBlock[i] < 16)
+                          Serial.print('0');
+
+                      Serial.print(tlsPrfBlock[i], HEX);
+                  }
+                  Serial.println();
+
+                  // Temporary
+
+                  // -------------------------------------------------------
+                  // M238 — AES-128 test
+                  // -------------------------------------------------------
+
+                  for (uint8_t i = 0; i < 16; i++)
+                  {
+                      tlsPrfBlock[i] =
+                          pgm_read_byte(&aesTestPlaintext[i]);
+                  }
+
+                  uint8_t aesTestKeyRAM[16];
+
+                  for (uint8_t i = 0; i < 16; i++)
+                  {
+                      aesTestKeyRAM[i] =
+                          pgm_read_byte(&aesTestKey[i]);
+                  }
+
+                  aes128EncryptBlock(
+                      aesTestKeyRAM,
+                      tlsPrfBlock
+                  );
+
+                  Serial.println(F("M238")); // AES-128 test ciphertext
+
+                  for (uint8_t i = 0; i < 16; i++)
+                  {
+                      if (tlsPrfBlock[i] < 16)
+                          Serial.print('0');
+
+                      Serial.print(tlsPrfBlock[i], HEX);
+                  }
+
+                  Serial.println();
+
+                  Serial.println(F("M239")); // SHA-256 abc test
+
+                  SHA256Context shaTestContext;
+                  uint8_t shaTestDigest[32];
+
+                  sha256Init(shaTestContext);
+
+                  for (uint8_t i = 0; i < 3; i++)
+                      sha256UpdateByte(
+                          shaTestContext,
+                          pgm_read_byte(&shaTestData[i])
+                      );
+
+                  sha256Final(shaTestContext, shaTestDigest);
+
+                  for (uint8_t i = 0; i < 32; i++)
+                  {
+                      if (shaTestDigest[i] < 0x10)
+                          Serial.print('0');
+
+                      Serial.print(shaTestDigest[i], HEX);
+                  }
+
+                  Serial.println();
+
               }
           }
           else if (firstByte == 0x02)
@@ -2204,12 +2604,7 @@ void setup()
 
             // Temporary test private scalar = 2.
             ecdhePrivate.v[0] = 2;
-
-            Point generator;
-
-            fromBigEndianProgmem(generator.x, P256_GX_BE);
-            fromBigEndianProgmem(generator.y, P256_GY_BE);
-
+            
             PointProjective ecdhePoint;
 
             // -------------------------------------------------------
@@ -2218,10 +2613,9 @@ void setup()
 
             Serial.println(F("Calculating client public key..."));
 
-            pointScalarMultiplyProjective(
+            pointScalarMultiplyGeneratorProjective(
                 ecdhePoint,
-                ecdhePrivate,
-                generator
+                ecdhePrivate
             );
 
             pointProjectiveToAffine(ecdheClientPublic, ecdhePoint);
@@ -2252,12 +2646,14 @@ void setup()
             Serial.println(F("Shared secret X:"));
             print256(ecdheSharedSecret);
 
+            Serial.println(F("TEST A"));
+
             Serial.println(F("ECDHE calculation complete."));
 
-            Serial.println("Deriving TLS master secret and key block...");
+            Serial.println(F("TEST B"));
 
+            Serial.println(F("Deriving TLS master secret and key block..."));
             deriveTLSKeys();
-
             Serial.println("TLS master secret:");
             for (uint8_t i = 0; i < 48; i++)
             {
@@ -2267,7 +2663,7 @@ void setup()
             }
             Serial.println();
 
-            Serial.println("Client write key:");
+            Serial.println(F("Client write key:"));
             for (uint8_t i = 0; i < 16; i++)
             {
                 if (clientWriteKey[i] < 0x10)
@@ -2276,7 +2672,7 @@ void setup()
             }
             Serial.println();
 
-            Serial.println("Server write key:");
+            Serial.println(F("Server write key:"));
             for (uint8_t i = 0; i < 16; i++)
             {
                 if (serverWriteKey[i] < 0x10)
@@ -2285,7 +2681,7 @@ void setup()
             }
             Serial.println();
 
-            Serial.println("Client write IV:");
+            Serial.println(F("Client write IV:"));
             for (uint8_t i = 0; i < 4; i++)
             {
                 if (clientWriteIV[i] < 0x10)
@@ -2294,7 +2690,7 @@ void setup()
             }
             Serial.println();
 
-            Serial.println("Server write IV:");
+            Serial.println(F("Server write IV:"));
             for (uint8_t i = 0; i < 4; i++)
             {
                 if (serverWriteIV[i] < 0x10)
@@ -2303,7 +2699,27 @@ void setup()
             }
             Serial.println();
 
-            Serial.println("TLS key derivation complete.");
+            Serial.println(F("TLS key derivation complete."));
+
+            Serial.println(F("M239")); // TLS 1.2 master secret
+            for (uint8_t i = 0; i < 48; i++)
+            {
+                if (tlsMasterSecret[i] < 0x10)
+                    Serial.print('0');
+
+                Serial.print(tlsMasterSecret[i], HEX);
+            }
+            Serial.println();
+
+            Serial.println(F("M240")); // TLS 1.2 key block
+            for (uint8_t i = 0; i < 40; i++)
+            {
+                if (tlsKeyBlock[i] < 0x10)
+                    Serial.print('0');
+
+                Serial.print(tlsKeyBlock[i], HEX);
+            }
+            Serial.println();
 
             uint8_t hashAlgorithm;
             uint8_t signatureAlgorithm;
@@ -2335,6 +2751,28 @@ void setup()
             }
 
             Serial.println(F("RSA signature consumed."));
+
+
+            Serial.println(F("M241")); // SHA-256("abc") test
+
+            sha256Init(tlsHmacContext);
+
+            sha256UpdateByte(tlsHmacContext, 'a');
+            sha256UpdateByte(tlsHmacContext, 'b');
+            sha256UpdateByte(tlsHmacContext, 'c');
+
+            sha256Final(tlsHmacContext, tlsHmacInnerHash);
+
+            for (uint8_t i = 0; i < 32; i++)
+            {
+                if (tlsHmacInnerHash[i] < 0x10)
+                    Serial.print('0');
+
+                Serial.print(tlsHmacInnerHash[i], HEX);
+            }
+
+            Serial.println();
+
 
           }
           else
