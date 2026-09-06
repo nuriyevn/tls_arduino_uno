@@ -2,6 +2,9 @@
 #include <Ethernet.h>
 #include <avr/pgmspace.h>
 #define DEBUG_TLS_ALERTS 0
+int minFreeMemory = 32767;
+extern char __heap_start;
+extern char *__brkval;
 struct U256
 {
   uint8_t v[32];
@@ -415,9 +418,18 @@ void modSub256(  U256 &result,  const U256 &a,  const U256 &b)
 void modMul256(U256 &result, const U256 &a, const U256 &b)
 {
     U256 temp;
-
     const U256 *x;
     const U256 *y;
+
+    char stackVariable;
+
+    int freeMemory =
+        &stackVariable -
+        (__brkval ? __brkval : &__heap_start);
+
+    if (freeMemory < minFreeMemory)
+        minFreeMemory = freeMemory;
+
 
     if (&result == &a && &result == &b)
     {
@@ -985,16 +997,17 @@ void pointDoubleProjective(PointProjective &p)
 
 void printMemory()
 {
-  extern char __heap_start;
-  extern char *__brkval;
-
   char stackVariable;
 
-  Serial.print(F("M242")); // SRAM addresses
+  int freeMemory =
+      &stackVariable -
+      (__brkval ? __brkval : &__heap_start);
 
-  Serial.print(F(" stack=0x"));
+  if (freeMemory < minFreeMemory)
+    minFreeMemory = freeMemory;
+
+  Serial.print(F("M242 stack=0x"));
   Serial.print((uint16_t)&stackVariable, HEX);
-
   Serial.print(F(" heap=0x"));
   Serial.print(
       (uint16_t)(__brkval ? __brkval : &__heap_start),
@@ -1002,14 +1015,11 @@ void printMemory()
   );
 
   Serial.print(F(" free="));
+  Serial.print(freeMemory);
 
-  int freeMemory =
-      &stackVariable -
-      (__brkval ? __brkval : &__heap_start);
-
-  Serial.println(freeMemory);
+  Serial.print(F(" min="));
+  Serial.println(minFreeMemory);
 }
-
 // Fixed TLS 1.2 ClientHello.
 // Stored in Flash instead of SRAM.
 const uint8_t clientHello[] PROGMEM =
@@ -1829,6 +1839,9 @@ void testECCMemory()
 
     Serial.println(F("Client public Y:"));
     print256(ecdheClientPublic.y);
+
+    Serial.print(F("MIN FREE SRAM (testECCMemory) = "));
+    Serial.println(minFreeMemory);
 }
 
 void setup()
@@ -2441,6 +2454,10 @@ void setup()
                 ecdhePoint,
                 ecdhePrivate
             );
+
+            Serial.println(F("MIN FREE SRAM (client.connected after pointScalarMultiplyGeneratorProjective) = "));
+            Serial.println(minFreeMemory);
+
             Serial.println(F("M242 BEFORE projective -> affine"));
             printMemory();
             pointProjectiveToAffine(ecdheClientPublic, ecdhePoint);
