@@ -2,6 +2,7 @@
 #include <Ethernet.h>
 #include <avr/pgmspace.h>
 #include "lcd.h"
+
 class SilentSerial
 {
 public:
@@ -23,8 +24,6 @@ public:
 
 SilentSerial silentSerial;
 #define Serial silentSerial
-
-
 
 #define DEBUG_TLS_ALERTS 0
 #define USE_EUCLIDEAN_INVERSE 1
@@ -621,7 +620,7 @@ uint8_t serverWriteIV[4];
 uint8_t clientRandom[32];
 uint8_t tlsKeyBlock[40];
 
-uint8_t tlsPrfSeed[64]; //  also used instead of  masterSeed[64] keySeed[64]; for deriveTLSKeys
+//uint8_t tlsPrfSeed[64]; //  also used instead of  masterSeed[64] keySeed[64]; for deriveTLSKeys
 uint8_t tlsPrfA[32];
 uint8_t tlsPrfInput[109];
 uint8_t tlsPrfBlock[32];
@@ -667,7 +666,7 @@ void tlsTranscriptFinal(uint8_t digest[32])
 
     // Save buffered data = 64 bytes
     for (uint8_t i = 0; i < 64; i++)
-        tlsPrfSeed[i] = tlsHmacContext.buffer[i];
+        tlsHmacKeyBlock[i]  = tlsHmacContext.buffer[i];
 
     // Finalize to produce the digest.
     sha256Final(tlsHmacContext, digest);
@@ -687,7 +686,7 @@ void tlsTranscriptFinal(uint8_t digest[32])
 
     // Restore buffered data.
     for (uint8_t i = 0; i < 64; i++)
-        tlsHmacContext.buffer[i] = tlsPrfSeed[i];
+        tlsHmacContext.buffer[i] = tlsHmacKeyBlock[i];
 }
 
 static bool tlsSendGCMRecord(
@@ -1413,8 +1412,8 @@ void deriveTLSKeys()
     // client_random || server_random
     for (uint8_t i = 0; i < 32; i++)
     {
-        tlsPrfSeed[i] = clientRandom[i];
-        tlsPrfSeed[32 + i] = serverRandom[i];
+        tlsHmacKeyBlock[i] = clientRandom[i];
+        tlsHmacKeyBlock[32 + i] = serverRandom[i];
     }
 
     const uint8_t masterLabel[] PROGMEM = "master secret";
@@ -1424,7 +1423,7 @@ void deriveTLSKeys()
         32,
         masterLabel,
         13,
-        tlsPrfSeed,
+        tlsHmacKeyBlock,
         64,
         tlsMasterSecret,
         48
@@ -1433,8 +1432,8 @@ void deriveTLSKeys()
     // server_random || client_random
     for (uint8_t i = 0; i < 32; i++)
     {
-        tlsPrfSeed[i] = serverRandom[i];
-        tlsPrfSeed[32 + i] = clientRandom[i];
+        tlsHmacKeyBlock[32 + i] = serverRandom[i];
+        tlsHmacKeyBlock[64 + i] = clientRandom[i];
     }
 
     const uint8_t keyLabel[] PROGMEM = "key expansion";
@@ -1444,7 +1443,7 @@ void deriveTLSKeys()
         48,
         keyLabel,
         13,
-        tlsPrfSeed,
+        tlsHmacKeyBlock,
         64,
         tlsKeyBlock,
         40
@@ -2792,943 +2791,977 @@ static void lcdGCMStatus(bool ok)
         lcdNumber(0, 80, 100, 0xF800);
     }
 }
+static bool resolveApiBinance(uint8_t ip[4])
+{
+    // DNS server obtained from DHCP.
+    IPAddress dns = Ethernet.dnsServerIP();
 
+    if (dns == IPAddress(0,0,0,0))
+        return false;
+
+    // UDP socket used directly for a minimal DNS A query.
+    EthernetUDP udp;
+
+    const uint16_t localPort = 53000;
+
+    if (!udp.begin(localPort))
+        return false;
+
+    uint16_t txid = 0x1234;
+
+    udp.beginPacket(dns, 53);
+
+    // Transaction ID
+    udp.write((uint8_t)(txid >> 8));
+    udp.write((uint8_t)txid);
+
+    // Flags: standard query, recursion desired
+    udp.write((uint8_t)0x01);
+    udp.write((uint8_t)0x00);
+
+    // QDCOUNT = 1
+    udp.write((uint8_t)0x00);
+    udp.write((uint8_t)0x01);
+
+    // ANCOUNT = 0
+    udp.write((uint8_t)0x00);
+    udp.write((uint8_t)0x00);
+
+    // NSCOUNT = 0
+    udp.write((uint8_t)0x00);
+    udp.write((uint8_t)0x00);
+
+    // ARCOUNT = 0
+    udp.write((uint8_t)0x00);
+    udp.write((uint8_t)0x00);
+
+    // api
+    udp.write((uint8_t)3);
+    udp.write('a');
+    udp.write('p');
+    udp.write('i');
+
+    // binance
+    udp.write((uint8_t)7);
+    udp.write('b');
+    udp.write('i');
+    udp.write('n');
+    udp.write('a');
+    udp.write('n');
+    udp.write('c');
+    udp.write('e');
+
+    // com
+    udp.write((uint8_t)3);
+    udp.write('c');
+    udp.write('o');
+    udp.write('m');
+
+    // QTYPE = A
+    udp.write((uint8_t)0x00);
+    udp.write((uint8_t)0x01);
+
+    // QCLASS = IN
+    udp.write((uint8_t)0x00);
+    udp.write((uint8_t)0x01);
+
+    udp.endPacket();
+
+    uint32_t start = millis();
+
+    while (millis() - start < 2000)
+    {
+        int packetSize = udp.parsePacket();
+
+        if (packetSize <= 0)
+            continue;
+
+        uint8_t buf[96];
+
+        int n = udp.read(buf, sizeof(buf));
+
+        if (n < 12)
+            break;
+
+        uint16_t answerCount =
+            ((uint16_t)buf[6] << 8) | buf[7];
+
+        if (answerCount == 0)
+            break;
+
+        // Skip DNS header + question.
+        uint16_t pos = 12;
+
+        while (pos < (uint16_t)n && buf[pos] != 0)
+            pos += buf[pos] + 1;
+
+        if (pos + 5 >= (uint16_t)n)
+            break;
+
+        pos++;       // terminating zero
+        pos += 4;    // QTYPE + QCLASS
+
+        // First answer
+        if (pos + 12 > (uint16_t)n)
+            break;
+
+        // NAME
+        pos += 2;
+
+        // TYPE
+        uint16_t type =
+            ((uint16_t)buf[pos] << 8) | buf[pos + 1];
+        pos += 2;
+
+        // CLASS
+        pos += 2;
+
+        // TTL
+        pos += 4;
+
+        // RDLENGTH
+        uint16_t rdLength =
+            ((uint16_t)buf[pos] << 8) | buf[pos + 1];
+        pos += 2;
+
+        if (type == 1 && rdLength == 4 && pos + 4 <= (uint16_t)n)
+        {
+            ip[0] = buf[pos];
+            ip[1] = buf[pos + 1];
+            ip[2] = buf[pos + 2];
+            ip[3] = buf[pos + 3];
+
+            udp.stop();
+            return true;
+        }
+
+        break;
+    }
+
+    udp.stop();
+    return false;
+}
 uint8_t runTLS()
 {
-    // move the current TLS workflow here
+    // =======================================================
+    // RESET TLS STATE
+    // =======================================================
 
-    ...
+    tlsWriteSequence = 0;
+    tlsReadSequence = 0;
+    tlsTranscriptRecord = false;
+    uint16_t freeBeforeConnect = getFreeMemory();
 
-    return 2;
-}
+    lcdFillScreen(0x0000);
+    lcdNumber(
+        freeBeforeConnect,
+        60,
+        100,
+        0x07E0
+    );
 
+    delay(3000);
+    uint8_t apiIP[4];
 
-void setup()
-{
+    freeBeforeConnect = getFreeMemory();
 
-  lcdInit();
-  Serial.begin(115200);
-  delay(1000);
-  Serial.println(F("Starting Ethernet..."));
-  if (Ethernet.begin(mac) == 0)
-  {
-    Serial.println(F("DHCP failed!"));
-    Serial.print(F("IP address: "));
-    Serial.println(Ethernet.localIP());
-    return;
-  }
-  delay(1000);
-  Serial.print(F("IP address: "));
-  Serial.println(Ethernet.localIP());
-  Serial.println(F("SKIPPING TCP — ECC SRAM TEST"));
+    if (!client.connect(F("api.binance.com"), 443))
+        return 13;
 
-  testECCMemory();
-  lcdMemory();
-  //lcdFillScreen(0x0000);
-  //lcdNumber(minFreeMemory, 45, 40, 0xFFFF);
-  delay(5000);
-  bool gcmOK = testGCM();
-  lcdGCMStatus(gcmOK);
-  delay(1000);
-  lcdMemory();
+    return 60;
+    // =======================================================
+    // CLIENT HELLO
+    // =======================================================
 
+    tlsTranscriptInit();
 
+    size_t sent = sendClientHello();
 
-  // =======================================================
-  // TCP CONNECTION
-  // ==========================That's enough debugging. We actually need to optimize things. =============================
-  Serial.println(F("Connecting to api.coinpaprika.com:443..."));
-  if (!client.connect(F("api.binance.com"), 443))
-  {
-  Serial.println(F("TCP connection failed!"));
-      }
-  // CLIENT HELLO
-  // =======================================================
-
-  Serial.println();
-
-  Serial.print(F("ClientHello size: "));
-  Serial.println(clientHelloLength);
-
-  Serial.println();
-
-  Serial.println(F("ClientHello bytes:"));
-  printHexPROGMEM(clientHello, clientHelloLength);
-
-
-  // =======================================================
-  // SEND CLIENT HELLO
-  // =======================================================
-
-  Serial.println();
-
-  Serial.println(F("Sending ClientHello..."));
-  tlsTranscriptInit();
-  size_t sent = sendClientHello();
-
-  Serial.print(F("Bytes sent: "));
-  Serial.println(sent);
-
-  Serial.println(F("ClientHello sent!"));
-
-
-  // =======================================================
-  // WAIT FOR TLS RESPONSE
-  // =======================================================
-
-  Serial.println();
-
-  Serial.println(F("Waiting for TLS response..."));
-
-  unsigned long start = millis();
-  printMemory();
-
-  while (millis() - start < 15000)
-  {
-    if (client.available())
+    if (sent != clientHelloLength)
     {
-      Serial.println();
+        return 15;
+    }
 
-      Serial.println(F("Received TLS bytes:"));
+    // =======================================================
+    // RECEIVE TLS RECORDS
+    // =======================================================
 
-      while (client.connected())
-      {
-        tlsTranscriptRecord = false;
-        uint8_t contentType;
-        uint8_t versionMajor;
-        uint8_t versionMinor;
-        uint16_t recordLength;
+    unsigned long start = millis();
 
-
-        if (!readTLSRecordHeader(
-              contentType,
-              versionMajor,
-              versionMinor,
-              recordLength))
+    while (millis() - start < 15000UL)
+    {
+        if (!client.available())
         {
-          Serial.println(F("Could not read TLS record header."));
-          break;
+            delay(10);
+            continue;
         }
 
-        tlsTranscriptRecord =  (contentType == 0x16);
-
-
-        Serial.println();
-        Serial.print(F("Content type: 0x"));
-
-        if (contentType < 0x10)
-          Serial.print('0');
-
-        Serial.println(contentType, HEX);
-
-
-        Serial.print(F("TLS version: "));
-
-        Serial.print(versionMajor);
-        Serial.print(F("."));
-        Serial.println(versionMinor);
-
-
-        Serial.print(F("Record length: "));
-        Serial.println(recordLength);
-
-
-        // For now, just consume the record payload.
-        // We will parse it properly in the next step.
-
-        // =======================================================
-        // READ TLS RECORD PAYLOAD
-        // =======================================================
-
-        //println erial.println(modMulCount);ln==================
-        // READ TLS RECORD PAYLOAD
-        // =======================================================
-
-        if (contentType == 0x16)
+        while (client.connected())
         {
-          // -------------------------------------------------------
-          // Handshake record
-          // -------------------------------------------------------
+            tlsTranscriptRecord = false;
 
-          uint8_t firstByte;
+            uint8_t contentType;
+            uint8_t versionMajor;
+            uint8_t versionMinor;
+            uint16_t recordLength;
 
-          if (!readTLSByte(firstByte))
-          {
-              Serial.println(F("Could not read handshake type."));
-              break;
-          }
+            // ---------------------------------------------------
+            // TLS RECORD HEADER
+            // ---------------------------------------------------
 
-          // ServerHelloDone = handshake type 0x0E
-          if (firstByte == 0x0E)
-          {
-              Serial.println();
-              Serial.println(F("ServerHelloDone received."));
+            if (!readTLSRecordHeader(
+                    contentType,
+                    versionMajor,
+                    versionMinor,
+                    recordLength))
+            {
+                return 20;
+            }
+            tlsTranscriptRecord = (contentType == 0x16);
+            // ===================================================
+            // HANDSHAKE
+            // ===================================================
 
-              // We already consumed the handshake type.
-              // ServerHelloDone has a 3-byte handshake length,
-              // which must be zero.
-              uint8_t b1;
-              uint8_t b2;
-              uint8_t b3;
+            if (contentType == 0x16)
+            {
+                uint8_t firstByte;
 
-              if (!readTLSByte(b1) ||
-                  !readTLSByte(b2) ||
-                  !readTLSByte(b3))
-              {
-                  Serial.println(F("Could not read ServerHelloDone length."));
-                  break;
-              }
-
-                if (b1 != 0 || b2 != 0 || b3 != 0)
+                if (!readTLSByte(firstByte))
                 {
-                  Serial.println(F("Invalid ServerHelloDone length."));
-                  break;
+                    return 21;
                 }
 
-              Serial.println(F("ServerHelloDone parsed."));
-
-              // -------------------------------------------------------
-              // ClientKeyExchange
-              // -------------------------------------------------------
-
-              Serial.println(F("Sending ClientKeyExchange..."));
-
-              size_t sent = sendClientKeyExchange(ecdheClientPublic);
-
-              Serial.print(F("ClientKeyExchange bytes sent: "));
-              Serial.println(sent);
-
-              if (sent != 75)
-              {
-                    Serial.println(F("ERROR: ClientKeyExchange was not fully sent."));
-                  }
-                  else
-                  {
-                    Serial.println(F("ClientKeyExchange sent!"));
-                  // -------------------------------------------------------
-                  // Finish handshake transcript
-                  // -------------------------------------------------------
-                  // ClientKeyExchange handshake message:
-                  // 10 00 00 42 41 04 X[32] Y[32]
-                  tlsTranscriptUpdateByte(0x10);
-                  tlsTranscriptUpdateByte(0x00);
-                  tlsTranscriptUpdateByte(0x00);
-                  tlsTranscriptUpdateByte(0x42);
-                  tlsTranscriptUpdateByte(0x41);
-                  tlsTranscriptUpdateByte(0x04);
-
-                  for (int8_t i = 31; i >= 0; i--)
-                      tlsTranscriptUpdateByte(ecdheClientPublic.x.v[i]);
-
-                  for (int8_t i = 31; i >= 0; i--)
-                      tlsTranscriptUpdateByte(ecdheClientPublic.y.v[i]);
-                  tlsTranscriptFinal(tlsTranscriptHash);
-
-                  Serial.println(F("M235")); // Transcript SHA-256
-
-                  for (uint8_t i = 0; i < 32; i++)
-                  {
-                      if (tlsTranscriptHash[i] < 16)
-                          Serial.print('0');
-
-                      Serial.print(tlsTranscriptHash[i], HEX);
-                  }
-
-                  Serial.println();
-                  // -------------------------------------------------------
-
-                  const uint8_t clientFinishedLabel[] PROGMEM = "client finished";
-
-                  tlsPrfSha256(
-                      tlsMasterSecret,
-                      48,
-                      clientFinishedLabel,
-                      15,
-                      tlsTranscriptHash,
-                      32,
-                      tlsPrfBlock,
-                      12
-                  );
-
-                  Serial.println(F("M236")); //"Client Finished verify_data: "
-
-                  for (uint8_t i = 0; i < 12; i++)
-                  {
-                      if (tlsPrfBlock[i] < 16)
-                          Serial.print('0');
-
-                      Serial.print(tlsPrfBlock[i], HEX);
-                  }
-
-                  Serial.println();
-
-                  for (int8_t i = 11; i >= 0; i--)
-                      tlsPrfBlock[4 + i] = tlsPrfBlock[i];
-
-                  tlsPrfBlock[0] = 0x14;
-                  tlsPrfBlock[1] = 0x00;
-                  tlsPrfBlock[2] = 0x00;
-                  tlsPrfBlock[3] = 0x0C;
-
-                  // -------------------------------------------------------
-                  // Send ChangeCipherSpec
-                  // -------------------------------------------------------
-
-                  if (!tlsSendChangeCipherSpec())
-                  {
-                      while (1);
-                  }
-
-                  // -------------------------------------------------------
-                  // First encrypted record uses sequence number 0
-                  // -------------------------------------------------------
-
-                  tlsWriteSequence = 0;
-
-                  // -------------------------------------------------------
-                  // Encrypt and send Client Finished
-                  // -------------------------------------------------------
-
-                  if (!tlsSendGCMRecord(
-                          0x16,          // Handshake
-                          tlsPrfBlock,
-                          16             // Finished handshake = 4 + 12
-                      ))
-                  {
-                      while (1);
-                  }
-
-                  // Add Client Finished to handshake transcript
-                  // -------------------------------------------------------
-
-                  for (uint8_t i = 0; i < 16; i++)
-                      tlsTranscriptUpdateByte(tlsPrfBlock[i]);
-                      
-
-
-                  Serial.println(F("M237")); // Client Finished handshake
-
-                  for (uint8_t i = 0; i < 16; i++)
-                  {
-                      if (tlsPrfBlock[i] < 16)
-                          Serial.print('0');
-
-                      Serial.print(tlsPrfBlock[i], HEX);
-                  }
-                  Serial.println();
-                  Serial.println(F("M239")); // SHA-256 abc test
-
-                  SHA256Context shaTestContext;
-                  uint8_t shaTestDigest[32];
-
-                  sha256Init(shaTestContext);
-
-                  for (uint8_t i = 0; i < 3; i++)
-                      sha256UpdateByte(
-                          shaTestContext,
-                          pgm_read_byte(&shaTestData[i])
-                      );
-
-                  sha256Final(shaTestContext, shaTestDigest);
-
-                  for (uint8_t i = 0; i < 32; i++)
-                  {
-                      if (shaTestDigest[i] < 0x10)
-                          Serial.print('0');
-
-                      Serial.print(shaTestDigest[i], HEX);
-                  }
-
-                  Serial.println();
-
-              }
-          }
-          else if (firstByte == 0x02)
-          {
-              Serial.println();
-              Serial.println(F("ServerHello received."));
-
-              // -------------------------------------------------------
-              // ServerHello handshake length
-              // -------------------------------------------------------
+                // =================================================
+                // SERVER HELLO
+                // =================================================
+
+                if (firstByte == 0x02)
+                {
+                    uint32_t handshakeLength;
+
+                    if (!readTLSU24(handshakeLength))
+                    {
+                        return 22;
+                    }
+
+                    if (!readTLSByte(versionMajor) ||
+                        !readTLSByte(versionMinor))
+                    {
+                        return 22;
+                    }
+
+                    // Server random
+                    for (uint8_t i = 0; i < 32; i++)
+                    {
+                        if (!readTLSByte(serverRandom[i]))
+                        {
+                            return 22;
+                        }
+                    }
+
+                    // Session ID
+                    uint8_t sessionIdLength;
+
+                    if (!readTLSByte(sessionIdLength))
+                    {
+                        return 22;
+                    }
+
+                    if (!consumeTLSBytes(sessionIdLength))
+                    {
+                        return 22;
+                    }
+
+                    // Cipher suite
+                    if (!readTLSU16(selectedCipherSuite))
+                    {
+                        return 22;
+                    }
+
+                    // Compression
+                    uint8_t compressionMethod;
+
+                    if (!readTLSByte(compressionMethod))
+                    {
+                        return 22;
+                    }
+
+                    if (compressionMethod != 0x00)
+                    {
+                        return 23;
+                    }
+
+                    // Extensions
+                    uint16_t extensionsLength;
+
+                    if (!readTLSU16(extensionsLength))
+                    {
+                        return 22;
+                    }
+
+                    if (!consumeTLSBytes(extensionsLength))
+                    {
+                        return 22;
+                    }
+
+                    // ServerHello succeeded.
+                }
+
+                // =================================================
+                // SERVER KEY EXCHANGE
+                // =================================================
+
+                else if (firstByte == 0x0C)
+                {
+                    uint32_t handshakeLength;
+
+                    if (!readTLSU24(handshakeLength))
+                    {
+                        return 30;
+                    }
+
+                    if (handshakeLength !=
+                        (uint32_t)(recordLength - 4))
+                    {
+                        return 30;
+                    }
+
+                    // ------------------------------------------------
+                    // EC PARAMETERS
+                    // ------------------------------------------------
+
+                    uint8_t curveType;
+
+                    if (!readTLSByte(curveType))
+                    {
+                        return 31;
+                    }
+
+                    uint16_t namedCurve;
+
+                    if (!readTLSU16(namedCurve))
+                    {
+                        return 31;
+                    }
+
+                    if (curveType != 0x03 ||
+                        namedCurve != 0x0017)
+                    {
+                        return 31;
+                    }
+
+                    // ------------------------------------------------
+                    // SERVER EC POINT
+                    // ------------------------------------------------
+
+                    uint8_t pointLength;
 
-              uint32_t handshakeLength;
-
-              if (!readTLSU24(handshakeLength))
-              {
-                  Serial.println(F("Could not read ServerHello length."));
-                  break;
-              }
-
-              Serial.print(F("Handshake length: "));
-              Serial.println(handshakeLength);
-
-              // -------------------------------------------------------
-              // Server version
-              // -------------------------------------------------------
-
-              uint8_t versionMajor;
-              uint8_t versionMinor;
-
-              if (!readTLSByte(versionMajor) ||
-                  !readTLSByte(versionMinor))
-              {
-                  Serial.println(F("Could not read ServerHello version."));
-                  break;
-              }
-
-              Serial.print(F("Server TLS version: "));
-              Serial.print(versionMajor);
-              Serial.print(F("."));
-              Serial.println(versionMinor);
-
-              // -------------------------------------------------------
-              // Server random
-              // -------------------------------------------------------
-
-              for (uint8_t i = 0; i < 32; i++)
-              {
-                  if (!readTLSByte(serverRandom[i]))
-                  {
-                      Serial.println(F("Could not read server random."));
-                      break;
-                  }
-              }
-
-              Serial.println(F("Server random:"));
-
-              for (uint8_t i = 0; i < 32; i++)
-              {
-                  if (serverRandom[i] < 0x10)
-                      Serial.print('0');
-
-                  Serial.print(serverRandom[i], HEX);
-              }
-
-              Serial.println();
-
-              // -------------------------------------------------------
-              // Session ID
-              // -------------------------------------------------------
-
-              uint8_t sessionIdLength;
-
-              if (!readTLSByte(sessionIdLength))
-              {
-                  Serial.println(F("Could not read session ID length."));
-                  break;
-              }
-
-              Serial.print(F("Session ID length: "));
-              Serial.println(sessionIdLength);
-
-              if (!consumeTLSBytes(sessionIdLength))
-              {
-                  Serial.println(F("Could not consume session ID."));
-                  break;
-              }
-
-              // -------------------------------------------------------
-              // Selected cipher suite
-              // -------------------------------------------------------
-
-              if (!readTLSU16(selectedCipherSuite))
-              {
-                  Serial.println(F("Could not read cipher suite."));
-                  break;
-              }
-
-              Serial.print(F("Selected cipher suite: 0x"));
-
-              if (selectedCipherSuite < 0x1000)
-                  Serial.print('0');
-
-              Serial.println(selectedCipherSuite, HEX);
-
-              // -------------------------------------------------------
-              // Compression method
-              // -------------------------------------------------------
-
-              uint8_t compressionMethod;
-
-              if (!readTLSByte(compressionMethod))
-              {
-                  Serial.println(F("Could not read compression method."));
-                  break;
-              }
-
-              Serial.print(F("Compression method: 0x"));
-              Serial.println(compressionMethod, HEX);
-
-              // -------------------------------------------------------
-              // ServerHello extensions
-              // -------------------------------------------------------
-
-              uint16_t extensionsLength;
-
-              if (!readTLSU16(extensionsLength))
-              {
-                  Serial.println(F("Could not read extensions length."));
-                  break;
-              }
-
-              Serial.print(F("Extensions length: "));
-              Serial.println(extensionsLength);
-
-              if (!consumeTLSBytes(extensionsLength))
-              {
-                  Serial.println(F("Could not consume ServerHello extensions."));
-                  break;
-              }
-
-              Serial.println(F("ServerHello parsed."));
-          }
-          else if (firstByte == 0x0C)
-          {
-            Serial.println();
-            Serial.println(F("ServerKeyExchange received."));
-
-            // We consumed handshake type, so the streaming parser
-            // expects the 3-byte handshake length next.
-            //
-            // Reconstruct the parser manually from this point.
-
-            uint32_t handshakeLength;
-
-            if (!readTLSU24(handshakeLength))
-            {
-              Serial.println(F("Could not read SKE handshake length."));
-              break;
+                    if (!readTLSByte(pointLength))
+                    {
+                        return 32;
+                    }
+
+                    if (pointLength != 65)
+                    {
+                        return 32;
+                    }
+
+                    uint8_t pointFormat;
+
+                    if (!readTLSByte(pointFormat))
+                    {
+                        return 32;
+                    }
+
+                    if (pointFormat != 0x04)
+                    {
+                        return 32;
+                    }
+
+                    // X
+                    for (uint8_t i = 0; i < 32; i++)
+                    {
+                        uint8_t value;
+
+                        if (!readTLSByte(value))
+                        {
+                            return 32;
+                        }
+
+                        ecc.point1.x.v[31 - i] = value;
+                    }
+
+                    // Y
+                    for (uint8_t i = 0; i < 32; i++)
+                    {
+                        uint8_t value;
+
+                        if (!readTLSByte(value))
+                        {
+                            return 32;
+                        }
+
+                        ecc.point1.y.v[31 - i] = value;
+                    }
+
+                    // ------------------------------------------------
+                    // CLIENT PRIVATE SCALAR
+                    // ------------------------------------------------
+
+                    zero256(ecdhePrivate);
+
+                    // Current test scalar.
+                    ecdhePrivate.v[0] = 2;
+
+                    // ------------------------------------------------
+                    // CLIENT PUBLIC = d * G
+                    // ------------------------------------------------
+
+                    pointScalarMultiplyGeneratorProjective(
+                        ecdhePoint,
+                        ecdhePrivate
+                    );
+
+                    pointProjectiveToAffine(
+                        ecdheClientPublic,
+                        ecdhePoint
+                    );
+
+                    // ------------------------------------------------
+                    // SHARED SECRET = d * SERVER PUBLIC
+                    // ------------------------------------------------
+
+                    pointScalarMultiplyProjective(
+                        ecdhePoint,
+                        ecdhePrivate,
+                        ecc.point1
+                    );
+
+                    pointProjectiveToAffineX(
+                        ecdheSharedSecret,
+                        ecdhePoint
+                    );
+
+                    // ------------------------------------------------
+                    // TLS KEYS
+                    // ------------------------------------------------
+
+                    deriveTLSKeys();
+
+                    // ------------------------------------------------
+                    // Signature
+                    // ------------------------------------------------
+
+                    uint8_t hashAlgorithm;
+                    uint8_t signatureAlgorithm;
+
+                    if (!readTLSByte(hashAlgorithm) ||
+                        !readTLSByte(signatureAlgorithm))
+                    {
+                        return 36;
+                    }
+
+                    uint16_t signatureLength;
+
+                    if (!readTLSU16(signatureLength))
+                    {
+                        return 36;
+                    }
+
+                    if (!consumeTLSBytes(signatureLength))
+                    {
+                        return 36;
+                    }
+                }
+
+                // =================================================
+                // SERVER HELLO DONE
+                // =================================================
+
+                else if (firstByte == 0x0E)
+                {
+                    uint8_t b1;
+                    uint8_t b2;
+                    uint8_t b3;
+
+                    if (!readTLSByte(b1) ||
+                        !readTLSByte(b2) ||
+                        !readTLSByte(b3))
+                    {
+                        return 40;
+                    }
+
+                    if (b1 != 0 ||
+                        b2 != 0 ||
+                        b3 != 0)
+                    {
+                        return 41;
+                    }
+
+                    // ------------------------------------------------
+                    // CLIENT KEY EXCHANGE
+                    // ------------------------------------------------
+
+                    size_t ckxSent =
+                        sendClientKeyExchange(ecdheClientPublic);
+
+                    if (ckxSent != 75)
+                    {
+                        return 42;
+                    }
+
+                    // ------------------------------------------------
+                    // ADD CLIENT KEY EXCHANGE TO TRANSCRIPT
+                    // ------------------------------------------------
+
+                    tlsTranscriptUpdateByte(0x10);
+                    tlsTranscriptUpdateByte(0x00);
+                    tlsTranscriptUpdateByte(0x00);
+                    tlsTranscriptUpdateByte(0x42);
+                    tlsTranscriptUpdateByte(0x41);
+                    tlsTranscriptUpdateByte(0x04);
+
+                    for (int8_t i = 31; i >= 0; i--)
+                    {
+                        tlsTranscriptUpdateByte(
+                            ecdheClientPublic.x.v[i]
+                        );
+                    }
+
+                    for (int8_t i = 31; i >= 0; i--)
+                    {
+                        tlsTranscriptUpdateByte(
+                            ecdheClientPublic.y.v[i]
+                        );
+                    }
+
+                    // ------------------------------------------------
+                    // TRANSCRIPT HASH
+                    // ------------------------------------------------
+
+                    tlsTranscriptFinal(tlsTranscriptHash);
+
+                    // ------------------------------------------------
+                    // CLIENT FINISHED VERIFY DATA
+                    // ------------------------------------------------
+
+                    const uint8_t clientFinishedLabel[]
+                        PROGMEM = "client finished";
+
+                    tlsPrfSha256(
+                        tlsMasterSecret,
+                        48,
+                        clientFinishedLabel,
+                        15,
+                        tlsTranscriptHash,
+                        32,
+                        tlsPrfBlock,
+                        12
+                    );
+
+                    // ------------------------------------------------
+                    // BUILD FINISHED HANDSHAKE
+                    // ------------------------------------------------
+
+                    for (int8_t i = 11; i >= 0; i--)
+                    {
+                        tlsPrfBlock[4 + i] =
+                            tlsPrfBlock[i];
+                    }
+
+                    tlsPrfBlock[0] = 0x14;
+                    tlsPrfBlock[1] = 0x00;
+                    tlsPrfBlock[2] = 0x00;
+                    tlsPrfBlock[3] = 0x0C;
+
+                    // ------------------------------------------------
+                    // CHANGE CIPHER SPEC
+                    // ------------------------------------------------
+
+                    if (!tlsSendChangeCipherSpec())
+                    {
+                        return 52;
+                    }
+
+                    // ------------------------------------------------
+                    // FIRST ENCRYPTED RECORD
+                    // ------------------------------------------------
+
+                    tlsWriteSequence = 0;
+
+                    if (!tlsSendGCMRecord(
+                            0x16,
+                            tlsPrfBlock,
+                            16))
+                    {
+                        return 53;
+                    }
+
+                    // ------------------------------------------------
+                    // ADD FINISHED TO TRANSCRIPT
+                    // ------------------------------------------------
+
+                    for (uint8_t i = 0; i < 16; i++)
+                    {
+                        tlsTranscriptUpdateByte(
+                            tlsPrfBlock[i]
+                        );
+                    }
+
+                    // =================================================
+                    // SUCCESS
+                    // =================================================
+
+                    return 60;
+                }
+
+                // =================================================
+                // UNKNOWN HANDSHAKE
+                // =================================================
+
+                else
+                {
+                    if (recordLength == 0)
+                    {
+                        return 21;
+                    }
+
+                    for (uint16_t i = 1;
+                         i < recordLength;
+                         i++)
+                    {
+                        uint8_t value;
+
+                        if (!readTLSByte(value))
+                        {
+                            return 21;
+                        }
+                    }
+                }
             }
-
-            Serial.print(F("Handshake length: "));
-            Serial.println(handshakeLength);
-
-            if (handshakeLength != (uint32_t)(recordLength - 4))
-            {
-              Serial.println(F("SKE length mismatch."));
-              break;
-            }
-
-            // The streaming parser below handles the SKE BODY.
-            // We have already consumed its 4-byte handshake header.
-
-            uint8_t curveType;
-
-            if (!readTLSByte(curveType))
-              break;
-
-            uint16_t namedCurve;
-
-            if (!readTLSU16(namedCurve))
-              break;
-
-            Serial.print(F("Curve type: 0x"));
-            Serial.println(curveType, HEX);
-
-            Serial.print(F("Named curve: 0x"));
-            Serial.println(namedCurve, HEX);
-
-            if (curveType != 0x03 || namedCurve != 0x0017)
-            {
-              Serial.println(F("Unsupported EC parameters."));
-              break;
-            }
-
-            uint8_t pointLength;
-
-            if (!readTLSByte(pointLength))
-              break;
-
-            if (pointLength != 65)
-            {
-              Serial.println(F("Unexpected EC point length."));
-              break;
-            }
-
-            uint8_t pointFormat;
-
-            if (!readTLSByte(pointFormat))
-              break;
-
-            if (pointFormat != 0x04)
-            {
-              Serial.println(F("Expected uncompressed EC point."));
-              break;
-            }
-
-            // X coordinated loop
-            for (int i = 0; i < 32; i++)
-            {
-              uint8_t value;
-
-              if (!readTLSByte(value))
-              {
-                Serial.println(F("Failed to read server EC point X."));
-                return;
-              }
-
-              ecc.point1.x.v[31 - i] = value;
-            }
-
-            // Y
-            for (int i = 0; i < 32; i++)
-            {
-              uint8_t value;
-
-              if (!readTLSByte(value))
-              {
-                Serial.println(F("Failed to read server EC point Y."));
-                return;
-              }
-
-              ecc.point1.y.v[31 - i] = value;
-            }
-
-            Serial.println(F("Server public X:"));
-            print256(ecc.point1.x);
-
-            Serial.println(F("Server public Y:"));
-            print256(ecc.point1.y);
 
             // =======================================================
-            // ECDHE TEST
+            // ALERT
             // =======================================================
 
-            zero256(ecdhePrivate);
-
-            // Temporary test private scalar = 2.
-            ecdhePrivate.v[0] = 2;
-            
-            // -------------------------------------------------------
-            // Client public key = private scalar × G
-            // -------------------------------------------------------
-
-            Serial.println(F("Calculating client public key..."));
-
-            pointScalarMultiplyGeneratorProjective(
-                ecdhePoint,
-                ecdhePrivate
-            );
-            Serial.print(F("modMul count(client.connected) = "));
-            Serial.println(modMulCount);
-            Serial.println(F("MIN FREE SRAM (client.connected after pointScalarMultiplyGeneratorProjective) = "));
-            Serial.println(minFreeMemory);
-
-            Serial.println(F("M242 BEFORE projective -> affine"));
-            printMemory();
-            pointProjectiveToAffine(ecdheClientPublic, ecdhePoint);
-
-            Serial.println(F("Client public X:"));
-            print256(ecdheClientPublic.x);
-
-            Serial.println(F("Client public Y:"));
-            print256(ecdheClientPublic.y);
-
-            // -------------------------------------------------------
-            // Shared secret = private scalar × server public key
-            // -------------------------------------------------------
-
-            Serial.println(F("Calculating shared secret..."));
-
-            pointScalarMultiplyProjective(
-                ecdhePoint,
-                ecdhePrivate,
-                ecc.point1
-            );
-
-            pointProjectiveToAffineX(
-                ecdheSharedSecret,
-                ecdhePoint
-            );
-
-            Serial.println(F("Shared secret X:"));
-            print256(ecdheSharedSecret);
-
-            Serial.println(F("TEST A"));
-
-            Serial.println(F("ECDHE calculation complete."));
-
-            Serial.println(F("TEST B"));
-
-            Serial.println(F("Deriving TLS master secret and key block..."));
-            deriveTLSKeys();
-            Serial.println("TLS master secret:");
-            for (uint8_t i = 0; i < 48; i++)
+            else if (contentType == 0x15)
             {
-                if (tlsMasterSecret[i] < 0x10)
-                    Serial.print("0");
-                Serial.print(tlsMasterSecret[i], HEX);
-            }
-            Serial.println();
-
-            Serial.println(F("Client write key:"));
-            for (uint8_t i = 0; i < 16; i++)
-            {
-                if (clientWriteKey[i] < 0x10)
-                    Serial.print("0");
-                Serial.print(clientWriteKey[i], HEX);
-            }
-            Serial.println();
-
-            Serial.println(F("Server write key:"));
-            for (uint8_t i = 0; i < 16; i++)
-            {
-                if (serverWriteKey[i] < 0x10)
-                    Serial.print("0");
-                Serial.print(serverWriteKey[i], HEX);
-            }
-            Serial.println();
-
-            Serial.println(F("Client write IV:"));
-            for (uint8_t i = 0; i < 4; i++)
-            {
-                if (clientWriteIV[i] < 0x10)
-                    Serial.print("0");
-                Serial.print(clientWriteIV[i], HEX);
-            }
-            Serial.println();
-
-            Serial.println(F("Server write IV:"));
-            for (uint8_t i = 0; i < 4; i++)
-            {
-                if (serverWriteIV[i] < 0x10)
-                    Serial.print("0");
-                Serial.print(serverWriteIV[i], HEX);
-            }
-            Serial.println();
-
-            Serial.println(F("TLS key derivation complete."));
-
-            Serial.println(F("M239")); // TLS 1.2 master secret
-            for (uint8_t i = 0; i < 48; i++)
-            {
-                if (tlsMasterSecret[i] < 0x10)
-                    Serial.print('0');
-
-                Serial.print(tlsMasterSecret[i], HEX);
-            }
-            Serial.println();
-
-            Serial.println(F("M240")); // TLS 1.2 key block
-            for (uint8_t i = 0; i < 40; i++)
-            {
-                if (tlsKeyBlock[i] < 0x10)
-                    Serial.print('0');
-
-                Serial.print(tlsKeyBlock[i], HEX);
-            }
-            Serial.println();
-
-            uint8_t hashAlgorithm;
-            uint8_t signatureAlgorithm;
-
-            if (!readTLSByte(hashAlgorithm))
-              break;
-
-            if (!readTLSByte(signatureAlgorithm))
-              break;
-
-            Serial.print(F("Signature hash algorithm: 0x"));
-            Serial.println(hashAlgorithm, HEX);
-
-            Serial.print(F("Signature algorithm: 0x"));
-            Serial.println(signatureAlgorithm, HEX);
-
-            uint16_t signatureLength;
-
-            if (!readTLSU16(signatureLength))
-              break;
-
-            Serial.print(F("Signature length: "));
-            Serial.println(signatureLength);
-
-            if (!consumeTLSBytes(signatureLength))
-            {
-              Serial.println(F("Could not consume RSA signature."));
-              break;
+                consumeTLSBytes(recordLength);
+                return 90;
             }
 
-            Serial.println(F("RSA signature consumed."));
+            // =======================================================
+            // OTHER RECORD
+            // =======================================================
 
-
-            Serial.println(F("M241")); // SHA-256("abc") test
-
-            sha256Init(tlsHmacContext);
-
-            sha256UpdateByte(tlsHmacContext, 'a');
-            sha256UpdateByte(tlsHmacContext, 'b');
-            sha256UpdateByte(tlsHmacContext, 'c');
-
-            sha256Final(tlsHmacContext, tlsHmacInnerHash);
-
-            for (uint8_t i = 0; i < 32; i++)
+            else
             {
-                if (tlsHmacInnerHash[i] < 0x10)
-                    Serial.print('0');
-
-                Serial.print(tlsHmacInnerHash[i], HEX);
-            }
-
-            Serial.println();
-
-
-          }
-          else
-          {
-            // We already consumed the handshake type.
-            // Consume the remaining handshake record.
-            for (uint16_t i = 1; i < recordLength; i++)
-            {
-              uint8_t value;
-
-              if (!readTLSByte(value))
-              {
-                Serial.println(F("Failed to consume handshake record."));
-                return;
-              }
-            }
-            Serial.print(F("Handshake type: 0x"));
-            Serial.println(firstByte, HEX);
-          }
-        }
-        #if DEBUG_TLS_ALERTS
-        else if (contentType == 0x15)
-        {
-            Serial.println();
-            Serial.println(F("TLS Alert received."));
-
-            if (recordLength != 2)
-            {
-                Serial.print(F("Unexpected Alert length: "));
-                Serial.println(recordLength);
-
                 if (!consumeTLSBytes(recordLength))
                 {
-                    Serial.println(F("Could not consume Alert."));
-                    break;
+                    return 91;
                 }
-
-                continue;
-            }
-
-            uint8_t alertLevel;
-            uint8_t alertDescription;
-
-            if (!readTLSByte(alertLevel) ||
-                !readTLSByte(alertDescription))
-            {
-                Serial.println(F("Could not read TLS Alert."));
-                break;
-            }
-
-            Serial.print(F("Alert level: 0x"));
-            if (alertLevel < 0x10)
-                Serial.print('0');
-            Serial.println(alertLevel, HEX);
-
-            Serial.print(F("Alert description: 0x"));
-            if (alertDescription < 0x10)
-                Serial.print('0');
-            Serial.println(alertDescription, HEX);
-
-            Serial.print(F("Alert: "));
-
-            switch (alertDescription)
-            {
-                case 0x00: Serial.println(F("close_notify")); break;
-                case 0x0A: Serial.println(F("unexpected_message")); break;
-                case 0x14: Serial.println(F("bad_record_mac")); break;
-                case 0x16: Serial.println(F("record_overflow")); break;
-                case 0x28: Serial.println(F("handshake_failure")); break;
-                case 0x2A: Serial.println(F("bad_certificate")); break;
-                case 0x2B: Serial.println(F("unsupported_certificate")); break;
-                case 0x2C: Serial.println(F("certificate_revoked")); break;
-                case 0x2D: Serial.println(F("certificate_expired")); break;
-                case 0x2E: Serial.println(F("certificate_unknown")); break;
-                case 0x2F: Serial.println(F("illegal_parameter")); break;
-                case 0x30: Serial.println(F("unknown_ca")); break;
-                case 0x31: Serial.println(F("access_denied")); break;
-                case 0x32: Serial.println(F("decode_error")); break;
-                case 0x33: Serial.println(F("decrypt_error")); break;
-                case 0x46: Serial.println(F("protocol_version")); break;
-                case 0x47: Serial.println(F("insufficient_security")); break;
-                case 0x50: Serial.println(F("user_canceled")); break;
-                case 0x5A: Serial.println(F("missing_extension")); break;
-                case 0x6A: Serial.println(F("unsupported_extension")); break;
-                case 0x70: Serial.println(F("unrecognized_name")); break;
-                case 0x74: Serial.println(F("certificate_required")); break;
-                case 0x78: Serial.println(F("no_application_protocol")); break;
-                default:   Serial.println(F("unknown")); break;
             }
         }
-        #else
-        else if (contentType == 0x15)
+
+        if (!client.connected())
         {
-            consumeTLSBytes(recordLength);
+            return 92;
         }
-        #endif
-        else
-        {
-          // -------------------------------------------------------
-          // Non-handshake record
-          // -------------------------------------------------------
-
-          for (uint16_t i = 0; i < recordLength; i++)
-          {
-            uint8_t value;
-
-            if (!readTLSByte(value))
-            {
-              Serial.println(F("Failed to consume TLS record."));
-              return;
-            }
-          }
-
-          Serial.println(F("TLS record consumed without buffering."));
-        }
-
-
-        // Don't immediately exit.
-        // There can be multiple TLS records.
-      }
     }
 
-
-    if (!client.connected())
-    {
-      Serial.println();
-
-      Serial.println(F("TCP connection was closed by server."));
-
-      break;
-    }
-
-    delay(10);
-  }
-
-
-  // =======================================================
-  // FINAL CONNECTION STATUS
-  // =======================================================
-
-  if (client.connected())
-  {
-    Serial.println();
-
-    Serial.println(F("TCP connection still open."));
-  }
-  else
-  {
-    Serial.println();
-
-    Serial.println(F("TCP connection closed."));
-  }
-
-
-  client.stop();
+    return 93;
 }
 
+
+uint8_t diagnoseTCP()
+{
+    // -------------------------------------------------
+    // TEST 1: Gateway TCP
+    // -------------------------------------------------
+
+    IPAddress gateway = Ethernet.gatewayIP();
+
+    if (!client.connect(gateway, 80))
+        return 20;
+
+    client.stop();
+
+
+    // -------------------------------------------------
+    // TEST 2: Internet TCP by IP, port 80
+    // -------------------------------------------------
+
+    if (!client.connect(IPAddress(1, 1, 1, 1), 80))
+        return 30;
+
+    client.stop();
+
+
+    // -------------------------------------------------
+    // TEST 3: Internet TCP by IP, port 443
+    // -------------------------------------------------
+
+    if (!client.connect(IPAddress(142, 250, 72, 14), 443))
+        return 40;
+
+    client.stop();
+
+
+    // -------------------------------------------------
+    // TEST 4: Hostname -> DNS + TCP :443
+    // -------------------------------------------------
+
+    if (!client.connect(F("google.com"), 443))
+        return 50;
+
+    client.stop();
+
+
+    // -------------------------------------------------
+    // TEST 5: Binance hostname -> DNS + TCP :443
+    // -------------------------------------------------
+
+    if (!client.connect(IPAddress(142, 250, 72, 14), 443))
+        return 60;
+
+    client.stop();
+
+
+    // -------------------------------------------------
+    // ALL NETWORK TESTS PASSED
+    // -------------------------------------------------
+
+    return 70;
+}
+
+void showStage(uint8_t stage)
+{
+    lcdFillScreen(0x0000);
+
+    lcdNumber(
+        stage,
+        60,
+        100,
+        0x07E0
+    );
+}
+
+void printIP(const IPAddress &ip)
+{
+    Serial.print(ip[0]);
+    Serial.print('.');
+    Serial.print(ip[1]);
+    Serial.print('.');
+    Serial.print(ip[2]);
+    Serial.print('.');
+    Serial.println(ip[3]);
+}
+bool testTCP(const char *hostname, uint16_t port)
+{
+    Serial.print("\nTCP: ");
+    Serial.print(hostname);
+    Serial.print(':');
+    Serial.println(port);
+
+    unsigned long start = millis();
+
+    if (client.connect(hostname, port))
+    {
+        Serial.print("TCP CONNECTED in ");
+        Serial.print(millis() - start);
+        Serial.println(" ms");
+
+        client.stop();
+
+        return true;
+    }
+
+    Serial.print("TCP FAILED after ");
+    Serial.print(millis() - start);
+    Serial.println(" ms");
+
+    return false;
+}
+bool testTCPByIP(
+    const IPAddress &ip,
+    uint16_t port
+)
+{
+    Serial.print("\nTCP by IP: ");
+    printIP(ip);
+
+    Serial.print("Port: ");
+    Serial.println(port);
+
+    unsigned long start = millis();
+
+    if (client.connect(ip, port))
+    {
+        Serial.print("TCP CONNECTED in ");
+        Serial.print(millis() - start);
+        Serial.println(" ms");
+
+        client.stop();
+
+        return true;
+    }
+
+    Serial.print("TCP FAILED after ");
+    Serial.print(millis() - start);
+    Serial.println(" ms");
+
+    return false;
+}
+void setup()
+{
+    Serial.begin(115200);
+    delay(1000);
+
+    if (Ethernet.begin(mac) == 0)
+    {
+        lcdFillScreen(0x0000);
+        lcdNumber(1, 60, 100, 0xF800);   // DHCP FAIL
+        while (1);
+    }
+
+    delay(1000);
+
+    uint8_t stage = runTLS();
+    lcdInit();
+    lcdFillScreen(0x0000);
+    lcdNumber(
+        stage,
+        60,
+        100,
+        stage >= 60 ? 0x07E0 : 0xF800
+    );
+
+    while (1);
+}
+
+// void setup()
+// {
+//     // --------------------------------------------------
+//     // LCD FIRST
+//     // --------------------------------------------------
+
+//     lcdInit();
+
+//     showStage(1);      // LCD initialized
+
+//     // --------------------------------------------------
+//     // SERIAL
+//     // --------------------------------------------------
+
+//     Serial.begin(115200);
+
+//     delay(1000);
+
+//     Serial.println();
+//     Serial.println("================================");
+//     Serial.println(" Ethernet + LCD diagnostic");
+//     Serial.println("================================");
+
+//     // --------------------------------------------------
+//     // DHCP
+//     // --------------------------------------------------
+
+//     showStage(2);
+
+//     Serial.println("\n[1] DHCP");
+
+//     int dhcpResult = Ethernet.begin(mac);
+
+//     if (dhcpResult == 0)
+//     {
+//         Serial.println("DHCP FAILED");
+
+//         showStage(20);
+
+//         while (1);
+//     }
+
+//     Serial.println("DHCP OK");
+
+//     // --------------------------------------------------
+//     // NETWORK INFORMATION
+//     // --------------------------------------------------
+
+//     showStage(3);
+
+//     Serial.println("\n[2] NETWORK");
+
+//     Serial.print("Local IP: ");
+//     printIP(Ethernet.localIP());
+
+//     Serial.print("Subnet:   ");
+//     printIP(Ethernet.subnetMask());
+
+//     Serial.print("Gateway:  ");
+//     printIP(Ethernet.gatewayIP());
+
+//     Serial.print("DNS:      ");
+//     printIP(Ethernet.dnsServerIP());
+
+//     // --------------------------------------------------
+//     // TCP BY IP
+//     // --------------------------------------------------
+
+//     showStage(4);
+
+//     Serial.println("\n[3] TCP BY IP");
+
+//     if (!testTCPByIP(
+//             IPAddress(142, 250, 72, 14),
+//             443))
+//     {
+//         showStage(24);
+//         while (1);
+//     }
+
+//     // --------------------------------------------------
+//     // GOOGLE HOSTNAME
+//     // --------------------------------------------------
+
+//     showStage(5);
+
+//     Serial.println("\n[4] TCP BY HOSTNAME");
+
+//     if (!testTCP(
+//             "api.binance.com",
+//             443))
+//     {
+//         showStage(25);
+//         while (1);
+//     }
+
+//     // --------------------------------------------------
+//     // BINANCE HOSTNAME
+//     // --------------------------------------------------
+
+//     showStage(6);
+
+//     if (!testTCP(
+//             "api.binance.com",
+//             443))
+//     {
+//         showStage(26);
+//         while (1);
+//     }
+
+//     // --------------------------------------------------
+//     // SUCCESS
+//     // --------------------------------------------------
+
+//     Serial.println();
+//     Serial.println("================================");
+//     Serial.println(" DIAGNOSTIC COMPLETE");
+//     Serial.println("================================");
+
+//     showStage(99);
+
+//     while (1);
+// }
 
 void loop()
 {
