@@ -330,23 +330,12 @@ uint8_t sub256(  U256 &result,  const U256 &a,  const U256 &b)
   return (uint8_t)borrow;
 }
 
-void fromBigEndian(  U256 &result,  const uint8_t *data)
-{
-  for (int i = 0; i < 32; i++)
-    result.v[i] = data[31 - i];
-}
 void fromBigEndianProgmem(U256 &result, const uint8_t *data)
 {
   for (int i = 0; i < 32; i++)
   {
     result.v[i] = pgm_read_byte(&data[31 - i]);
   }
-}
-
-void toBigEndian(  uint8_t *data,  const U256 &value)
-{
-  for (int i = 0; i < 32; i++)
-    data[i] = value.v[31 - i];
 }
 
 const uint8_t P256_PRIME_BE[32] PROGMEM =
@@ -397,28 +386,17 @@ const uint8_t P256_GY_BE[32] PROGMEM =
   0x37, 0xBF, 0x51, 0xF5
 };
 
+int comparePrime256(const U256 &a);
+void subtractPrime256(U256 &result);
 
 void modAdd256(U256 &result, const U256 &a, const U256 &b)
 {
-  U256 pMinusB;
+  uint8_t carry = add256(result, a, b);
 
-  // p - b
-  subPrime256(pMinusB, b);
-
-  // If a >= p-b:
-  //     a+b >= p
-  //     result = a - (p-b)
-  //
-  // Otherwise:
-  //     a+b < p
-  if (compare256(a, pMinusB) >= 0)
-  {
-    sub256(result, a, pMinusB);
-  }
-  else
-  {
-    add256(result, a, b);
-  }
+  // A carry means the full sum exceeded 2^256. Since p is less than
+  // 2^256, both that case and result >= p require one reduction.
+  if (carry || comparePrime256(result) >= 0)
+    subtractPrime256(result);
 }
 void modSub256(  U256 &result,  const U256 &a,  const U256 &b)
 {
@@ -436,9 +414,6 @@ void modSub256(  U256 &result,  const U256 &a,  const U256 &b)
 
 void modMul256(U256 &result, const U256 &a, const U256 &b)
 {
-
-  Serial.println(F("M242 INSIDE modMul256"));
-  printMemory();
   U256 x;
   U256 y;
 
@@ -938,9 +913,6 @@ U256 ecdhePrivate;
 void pointDoubleProjective(PointProjective &p);
 void pointDoubleProjective(PointProjective &p)
 {
-    Serial.println(F("M242 INSIDE pointDoubleProjective"));
-    printMemory();
-
     // A = X1²
     modMul256(ecc.temp1, p.x, p.x);
 
@@ -1140,24 +1112,6 @@ size_t sendClientHello()
   return sent;
 }
 
-// Print bytes
-void printHex(uint8_t *buffer, int length)
-{
-  for (int i = 0; i < length; i++)
-  {
-    if (buffer[i] < 0x10)
-      Serial.print('0');
-
-    Serial.print(buffer[i], HEX);
-    Serial.print(' ');
-
-    if ((i + 1) % 16 == 0)
-      Serial.println();
-  }
-
-  Serial.println();
-}
-
 bool readTLSByte(uint8_t &value)
 {
   unsigned long start = millis();
@@ -1236,124 +1190,6 @@ bool consumeTLSBytes(uint16_t count)
 
   return true;
 }
-
-void parseCertificate(const uint8_t *data, size_t len)
-{
-    Serial.println();
-    Serial.println(F("=== Certificate ==="));
-    size_t p = 0;
-    if (len < 4)
-    {
-        Serial.println(F("Certificate message too short."));
-        return;
-    }
-    // TLS Handshake header
-    uint8_t handshakeType = data[p++];
-
-    uint32_t handshakeLength =
-        ((uint32_t)data[p] << 16) |
-        ((uint32_t)data[p + 1] << 8) |
-        data[p + 2];
-    p += 3;
-    Serial.print(F("Handshake type: 0x"));
-    Serial.println(handshakeType, HEX);
-    Serial.print(F("Handshake length: "));
-    Serial.println(handshakeLength);
-    if (handshakeType != 0x0B)
-    {
-        Serial.println(F("Not a Certificate message."));
-        return;
-    }
-    if (p + 3 > len)
-    {
-        Serial.println(F("Missing certificate list length."));
-        return;
-    }
-    // certificate_list_length
-    uint32_t certificateListLength =
-        ((uint32_t)data[p] << 16) |
-        ((uint32_t)data[p + 1] << 8) |
-        data[p + 2];
-    p += 3;
-    Serial.print(F("Certificate list length: "));
-    Serial.println(certificateListLength);
-
-    size_t listEnd = p + certificateListLength;
-
-    if (listEnd > len)
-    {
-        Serial.println(F("Certificate list exceeds received data."));
-        return;
-    }
-
-    int certificateNumber = 0;
-
-    while (p < listEnd)
-    {
-        if (p + 3 > listEnd)
-        {
-            Serial.println(F("Missing certificate length."));
-            return;
-        }
-
-        uint32_t certificateLength =
-            ((uint32_t)data[p] << 16) |
-            ((uint32_t)data[p + 1] << 8) |
-            data[p + 2];
-
-        p += 3;
-
-        certificateNumber++;
-
-        Serial.print(F("Certificate #"));
-        Serial.print(certificateNumber);
-        Serial.print(F(" length: "));
-        Serial.println(certificateLength);
-
-        if (p + certificateLength > listEnd)
-        {
-            Serial.println(F("Certificate exceeds certificate list."));
-            return;
-        }
-
-        Serial.print(F("Certificate #"));
-        Serial.print(certificateNumber);
-        Serial.println(F(" first bytes:"));
-
-        size_t previewLength = certificateLength < 16
-                             ? certificateLength
-                             : 16;
-
-        for (size_t i = 0; i < previewLength; i++)
-        {
-            if (data[p + i] < 0x10)
-                Serial.print('0');
-
-            Serial.print(data[p + i], HEX);
-            Serial.print(' ');
-        }
-
-        Serial.println();
-
-        p += certificateLength;
-        // Each TLS Certificate entry also has:
-        // extensions length : uint16
-        // in newer TLS certificate structures.
-        // However, for TLS 1.2's Certificate message,
-        // the certificate_list entries are:
-        // certificate_length + certificate
-        // so there is no per-certificate extensions field here.
-    }
-
-    Serial.print(F("Certificates found: "));
-    Serial.println(certificateNumber);
-
-    if (p == listEnd)
-        Serial.println(F("Certificate list parsed successfully."));
-    else
-        Serial.println(F("Certificate list parsing ended unexpectedly."));
-}
-
 
 bool readTLSRecordHeader( uint8_t &contentType, uint8_t &versionMajor, uint8_t &versionMinor, uint16_t &recordLength)
 {
@@ -1435,17 +1271,31 @@ uint8_t subPrime256(U256 &result, const U256 &a)
 
   return (uint8_t)borrow;
 }
-void getPMinus2(U256 &result)
+
+void subtractPrime256(U256 &result)
 {
-  zero256(result);
-  result.v[0] = 2;
+  int16_t borrow = 0;
 
-  U256 temp;
-  copy256(temp, result);
+  for (int i = 0; i < 32; i++)
+  {
+    int16_t value =
+        (int16_t)result.v[i] -
+        (int16_t)primeByte256(i) -
+        borrow;
 
-  subPrime256(result, temp);
+    if (value < 0)
+    {
+      value += 256;
+      borrow = 1;
+    }
+    else
+    {
+      borrow = 0;
+    }
+
+    result.v[i] = (uint8_t)value;
+  }
 }
-
 uint8_t pMinus2Byte256(int i)
 {
   uint8_t value = pgm_read_byte(&P256_PRIME_BE[i]);
@@ -1486,48 +1336,6 @@ void modInverse256(U256 &result, const U256 &a)
   }
 }
 
-void pointDouble(Point &result, const Point &p)
-{
-  // temp1 = x²
-  modMul256(ecc.temp1, p.x, p.x);
-
-  // temp4 = 3
-  set256(ecc.temp4, 3);
-
-  // temp2 = 3x²
-  modMul256(ecc.temp2, ecc.temp1, ecc.temp4);
-
-  // temp2 = 3x² - 3
-  modSub256(ecc.temp2, ecc.temp2, ecc.temp4);
-
-  // temp3 = 2y
-  modAdd256(ecc.temp3, p.y, p.y);
-
-  // temp4 = inverse(2y)
-  modInverse256(ecc.temp4, ecc.temp3);
-
-  // temp2 = λ
-  modMul256(ecc.temp2, ecc.temp2, ecc.temp4);
-
-  // temp3 = λ²
-  modMul256(ecc.temp3, ecc.temp2, ecc.temp2);
-
-  // temp4 = 2x
-  modAdd256(ecc.temp4, p.x, p.x);
-
-  // result.x = λ² - 2x
-  modSub256(result.x, ecc.temp3, ecc.temp4);
-
-  // temp3 = x - result.x
-  modSub256(ecc.temp3, p.x, result.x);
-
-  // temp4 = λ(x - result.x)
-  modMul256(ecc.temp4, ecc.temp2, ecc.temp3);
-
-  // result.y = λ(x - result.x) - y
-  modSub256(result.y, ecc.temp4, p.y);
-}
-
 void pointProjectiveToAffine(Point &result, const PointProjective &p);
 void pointProjectiveToAffine(Point &result, const PointProjective &p)
 {
@@ -1545,32 +1353,6 @@ void pointProjectiveToAffine(Point &result, const PointProjective &p)
 
   // y = Y / Z³
   modMul256(result.y, p.y, ecc.temp1);
-}
-void pointAdd(Point &result, const Point &p, const Point &q)
-{
-  // λ = (qy - py) / (qx - px)
-  modSub256(ecc.temp1, q.y, p.y);
-  modSub256(ecc.temp2, q.x, p.x);
-
-  // inverse(qx - px)
-  modInverse256(ecc.temp4, ecc.temp2);
-
-  // λ
-  modMul256(ecc.temp1, ecc.temp1, ecc.temp4);
-
-  // λ²
-  modMul256(ecc.temp3, ecc.temp1, ecc.temp1);
-
-  // x3 = λ² - px - qx
-  modSub256(ecc.temp4, ecc.temp3, p.x);
-  modSub256(result.x, ecc.temp4, q.x);
-
-  // λ(px - x3)
-  modSub256(ecc.temp3, p.x, result.x);
-  modMul256(ecc.temp4, ecc.temp1, ecc.temp3);
-
-  // y3 = λ(px - x3) - py
-  modSub256(result.y, ecc.temp4, p.y);
 }
 bool isZero256(const U256 &a)
 {
@@ -1679,9 +1461,6 @@ void pointSetProjectiveGenerator(PointProjective &p)
 void pointAddAffineProjectiveProgmem(PointProjective &result, const uint8_t *px, const uint8_t *py);
 void pointAddAffineProjectiveProgmem(PointProjective &result, const uint8_t *px, const uint8_t *py)
 {
-
-  Serial.println(F("M242 INSIDE pointAddAffineProjectiveProgmem"));
-  printMemory();
   // Infinity + P = P
   if (isZero256(result.z))
   {
@@ -1853,9 +1632,6 @@ void __attribute__((noinline)) pointScalarMultiplyGeneratorProjective(
 
     bool started = false;
 
-    Serial.println(F("M242 BEFORE scalar multiplication"));
-    printMemory();
-
     for (int8_t byteIndex = 31; byteIndex >= 0; byteIndex--)
     {
         uint8_t value = scalar.v[byteIndex];
@@ -1868,9 +1644,6 @@ void __attribute__((noinline)) pointScalarMultiplyGeneratorProjective(
                     continue;
 
                 pointSetProjectiveGenerator(result);
-
-                Serial.println(F("M242 AFTER pointSetProjectiveGenerator"));
-                printMemory();
 
                 started = true;
                 continue;
@@ -1888,8 +1661,6 @@ void __attribute__((noinline)) pointScalarMultiplyGeneratorProjective(
         }
     }
 
-    Serial.println(F("M242 AFTER scalar multiplication"));
-    printMemory();
 }
 void pointProjectiveToAffineX(U256 &result, const PointProjective &p);
 void pointProjectiveToAffineX(U256 &result, const PointProjective &p)
@@ -2057,8 +1828,6 @@ void setup()
   Serial.println(F("SKIPPING TCP — ECC SRAM TEST"));
 
   testECCMemory();
-
-  return;
   // =======================================================
   // TCP CONNECTION
   // ==========================That's enough debugging. We actually need to optimize things. =============================
