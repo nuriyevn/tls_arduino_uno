@@ -2,7 +2,9 @@
 #include <Ethernet.h>
 #include <avr/pgmspace.h>
 #define DEBUG_TLS_ALERTS 0
+#define USE_EUCLIDEAN_INVERSE 1
 int minFreeMemory = 32767;
+uint32_t modMulCount = 0;
 extern char __heap_start;
 extern char *__brkval;
 struct U256
@@ -431,6 +433,7 @@ void modSub256(U256 &result, const U256 &a, const U256 &b)
 }
 void modMul256(U256 &result, const U256 &a, const U256 &b)
 {
+   modMulCount++;
     U256 temp;
     const U256 *x;
     const U256 *y;
@@ -1341,6 +1344,145 @@ void subtractPrime256(U256 &result)
     result.v[i] = (uint8_t)value;
   }
 }
+#if USE_EUCLIDEAN_INVERSE
+bool inverseIsOne256(const U256 &value)
+{
+  if (value.v[0] != 1)
+    return false;
+
+  for (uint8_t i = 1; i < 32; i++)
+  {
+    if (value.v[i] != 0)
+      return false;
+  }
+
+  return true;
+}
+
+bool inverseIsEven256(const U256 &value)
+{
+  return (value.v[0] & 1) == 0;
+}
+
+void inverseRightShift256(U256 &value)
+{
+  for (uint8_t i = 0; i < 31; i++)
+  {
+    value.v[i] =
+        (value.v[i] >> 1) |
+        (value.v[i + 1] << 7);
+  }
+
+  value.v[31] >>= 1;
+}
+
+uint8_t inverseAddPrime256(U256 &value)
+{
+  uint16_t carry = 0;
+
+  for (uint8_t i = 0; i < 32; i++)
+  {
+    uint16_t sum =
+        (uint16_t)value.v[i] +
+        primeByte256(i) +
+        carry;
+
+    value.v[i] = (uint8_t)sum;
+    carry = sum >> 8;
+  }
+
+  return (uint8_t)carry;
+}
+
+void inverseHalveModPrime256(U256 &value)
+{
+  if (inverseIsEven256(value))
+  {
+    inverseRightShift256(value);
+    return;
+  }
+
+  // Add p before shifting so an odd coefficient becomes even.
+  uint8_t carry = inverseAddPrime256(value);
+
+  for (uint8_t i = 0; i < 31; i++)
+  {
+    value.v[i] =
+        (value.v[i] >> 1) |
+        (value.v[i + 1] << 7);
+  }
+
+  value.v[31] =
+      (value.v[31] >> 1) |
+      (carry << 7);
+}
+
+void modInverse256(U256 &result, const U256 &a)
+{
+  U256 u;
+  U256 v;
+  U256 x1;
+  U256 x2;
+
+  copy256(u, a);
+  fromBigEndianProgmem(v, P256_PRIME_BE);
+
+  zero256(x1);
+  x1.v[0] = 1;
+  zero256(x2);
+
+  if (isZero256(u))
+  {
+    zero256(result);
+    return;
+  }
+
+  while (!inverseIsOne256(u) && !inverseIsOne256(v))
+  {
+    while (inverseIsEven256(u))
+    {
+      inverseRightShift256(u);
+      inverseHalveModPrime256(x1);
+    }
+
+    while (inverseIsEven256(v))
+    {
+      inverseRightShift256(v);
+      inverseHalveModPrime256(x2);
+    }
+
+    if (compare256(u, v) >= 0)
+    {
+      sub256(u, u, v);
+
+      if (compare256(x1, x2) >= 0)
+        sub256(x1, x1, x2);
+      else
+      {
+        sub256(x1, x2, x1);
+        subPrime256(x1, x1);
+      }
+    }
+    else
+    {
+      sub256(v, v, u);
+
+      if (compare256(x2, x1) >= 0)
+        sub256(x2, x2, x1);
+      else
+      {
+        sub256(x2, x1, x2);
+        subPrime256(x2, x2);
+      }
+    }
+  }
+
+  if (inverseIsOne256(u))
+    copy256(result, x1);
+  else
+    copy256(result, x2);
+}
+#else
 uint8_t pMinus2Byte256(int i)
 {
   uint8_t value = pgm_read_byte(&P256_PRIME_BE[i]);
@@ -1376,6 +1518,7 @@ void modInverse256(U256 &result, const U256 &a)
     }
   }
 }
+#endif
 
 void pointProjectiveToAffine(Point &result, const PointProjective &p);
 void pointProjectiveToAffine(Point &result, const PointProjective &p)
@@ -1717,6 +1860,7 @@ void pointProjectiveToAffineX(U256 &result, const PointProjective &p)
 void testScalarMultiplication()
 {
   Serial.println(F("=== Scalar multiplication test ==="));
+  modMulCount = 0;
 
   U256 k;
   zero256(k);
@@ -1729,11 +1873,16 @@ void testScalarMultiplication()
 
   // r = k × G
   pointScalarMultiplyGeneratorProjective(r, k);
-
+  Serial.print(F("modMul count after scalar = "));
+  Serial.println(modMulCount);
+  Serial.print(F("modMul count(testScalarmult) = "));
+  Serial.println(modMulCount);
   U256 x;
 
   // Convert only X coordinate back to affine.
   pointProjectiveToAffineX(x, r);
+  Serial.print(F("modMul count after affine = "));
+  Serial.println(modMulCount);
 
   Serial.println(F("2G X:"));
   print256(x);
@@ -1823,6 +1972,7 @@ size_t sendClientKeyExchange(const Point &publicKey)
 void testECCMemory()
 {
     Serial.println(F("=== ECC SRAM TEST ==="));
+  modMulCount = 0;
 
     zero256(ecdhePrivate);
 
@@ -1837,12 +1987,18 @@ void testECCMemory()
         ecdhePoint,
         ecdhePrivate);
 
+    Serial.print(F("modMul count after scalar = "));
+    Serial.println(modMulCount);
+
     Serial.println(F("M242 BEFORE projective -> affine"));
     printMemory();
 
     pointProjectiveToAffine(
         ecdheClientPublic,
         ecdhePoint);
+
+    Serial.print(F("modMul count after affine = "));
+    Serial.println(modMulCount);
 
     Serial.println(F("Client public X:"));
     print256(ecdheClientPublic.x);
@@ -1878,13 +2034,8 @@ void setup()
   Serial.println(F("Connecting to api.coinpaprika.com:443..."));
   if (!client.connect(F("api.binance.com"), 443))
   {
-    Serial.println(F("TCP connection failed!"));
-    return;
-  }
-  Serial.print(F("DNS: "));
-  Serial.println(Ethernet.dnsServerIP());
-
-  // =======================================================
+  Serial.println(F("TCP connection failed!"));
+      }
   // CLIENT HELLO
   // =======================================================
 
@@ -1959,8 +2110,6 @@ void setup()
 
 
         Serial.println();
-        Serial.println(F("=== TLS Record ==="));
-
         Serial.print(F("Content type: 0x"));
 
         if (contentType < 0x10)
@@ -1987,7 +2136,7 @@ void setup()
         // READ TLS RECORD PAYLOAD
         // =======================================================
 
-        // =======================================================
+        //println erial.println(modMulCount);ln==================
         // READ TLS RECORD PAYLOAD
         // =======================================================
 
@@ -2026,11 +2175,11 @@ void setup()
                   break;
               }
 
-              if (b1 != 0 || b2 != 0 || b3 != 0)
-              {
+                if (b1 != 0 || b2 != 0 || b3 != 0)
+                {
                   Serial.println(F("Invalid ServerHelloDone length."));
                   break;
-              }
+                }
 
               Serial.println(F("ServerHelloDone parsed."));
 
@@ -2047,11 +2196,11 @@ void setup()
 
               if (sent != 75)
               {
-                  Serial.println(F("ERROR: ClientKeyExchange was not fully sent."));
-              }
-              else
-              {
-                  Serial.println(F("ClientKeyExchange sent!"));
+                    Serial.println(F("ERROR: ClientKeyExchange was not fully sent."));
+                  }
+                  else
+                  {
+                    Serial.println(F("ClientKeyExchange sent!"));
                   // -------------------------------------------------------
                   // Finish handshake transcript
                   // -------------------------------------------------------
@@ -2082,9 +2231,6 @@ void setup()
                   }
 
                   Serial.println();
-
-                  // -------------------------------------------------------
-                  // M236 — Client Finished verify_data
                   // -------------------------------------------------------
 
                   const uint8_t clientFinishedLabel[] PROGMEM = "client finished";
@@ -2464,7 +2610,8 @@ void setup()
                 ecdhePoint,
                 ecdhePrivate
             );
-
+            Serial.print(F("modMul count(client.connected) = "));
+            Serial.println(modMulCount);
             Serial.println(F("MIN FREE SRAM (client.connected after pointScalarMultiplyGeneratorProjective) = "));
             Serial.println(minFreeMemory);
 
