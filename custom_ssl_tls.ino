@@ -3,28 +3,6 @@
 #include <avr/pgmspace.h>
 #include "lcd.h"
 
-class SilentSerial
-{
-public:
-  template <typename... Args>
-  void begin(Args...)
-  {
-  }
-
-  template <typename... Args>
-  void print(Args...)
-  {
-  }
-
-  template <typename... Args>
-  void println(Args...)
-  {
-  }
-};
-
-SilentSerial silentSerial;
-#define Serial silentSerial
-
 #define DEBUG_TLS_ALERTS 0
 #define USE_EUCLIDEAN_INVERSE 1
 
@@ -1025,15 +1003,6 @@ void set256(  U256 &result,  uint32_t value)
 }
 void print256(const U256 &value)
 {
-  for (int i = 31; i >= 0; i--)
-  {
-    if (value.v[i] < 0x10)
-      Serial.print('0');
-
-    Serial.print(value.v[i], HEX);
-  }
-
-  Serial.println();
 }
 
 const uint32_t SHA256_K[64] PROGMEM =
@@ -1685,22 +1654,6 @@ void printMemory()
           minFreeMemory = freeMemory;
   }
 
-  Serial.print(F("M242 stack=0x"));
-  Serial.print((uint16_t)&stackVariable, HEX);
-  Serial.print(F(" heap=0x"));
-  Serial.print(heapAddress, HEX);
-  if (valid)
-  {
-      Serial.print(F(" free="));
-      Serial.print(freeMemory);
-  }
-  else
-  {
-      Serial.print(F(" INVALID"));
-  }
-
-  Serial.print(F(" min="));
-  Serial.println(minFreeMemory);
 }
 // Fixed TLS 1.2 ClientHello.
 // Stored in Flash instead of SRAM.
@@ -1778,19 +1731,6 @@ const uint16_t clientHelloLength = sizeof(clientHello);
 
 void printHexPROGMEM(  const uint8_t *buffer,  uint16_t length)
 {
-  for (uint16_t i = 0; i < length; i++)
-  {
-    uint8_t value = pgm_read_byte(&buffer[i]);
-
-    if (value < 0x10)
-      Serial.print('0');
-
-    Serial.print(value, HEX);
-    Serial.print(' ');
-
-    if ((i + 1) % 16 == 0)
-      Serial.println();
-  }
 }
 
 size_t sendClientHello()
@@ -2524,7 +2464,6 @@ void pointProjectiveToAffineX(U256 &result, const PointProjective &p)
 
 void testScalarMultiplication()
 {
-  Serial.println(F("=== Scalar multiplication test ==="));
   modMulCount = 0;
 
   U256 k;
@@ -2538,38 +2477,17 @@ void testScalarMultiplication()
 
   // r = k × G
   pointScalarMultiplyGeneratorProjective(r, k);
-  Serial.print(F("modMul count after scalar = "));
-  Serial.println(modMulCount);
-  Serial.print(F("modMul count(testScalarmult) = "));
-  Serial.println(modMulCount);
   U256 x;
 
   // Convert only X coordinate back to affine.
   pointProjectiveToAffineX(x, r);
-  Serial.print(F("modMul count after affine = "));
-  Serial.println(modMulCount);
-
-  Serial.println(F("2G X:"));
   print256(x);
-
-  Serial.println(F("=== End scalar multiplication test ==="));
 }
 void printU256Hex(const U256 &a)
 {
-  for (int i = 0; i < 32; i++)
-  {
-    if (a.v[i] < 16)
-      Serial.print('0');
-
-    Serial.print(a.v[i], HEX);
-  }
-
-  Serial.println();
 }
 void testScalarMultiplicationProjective()
 {
-  Serial.println(F("Testing P-256 scalar multiplication..."));
-
   U256 scalar;
   Point generator;
   PointProjective result;
@@ -2587,10 +2505,7 @@ void testScalarMultiplicationProjective()
 
   pointProjectiveToAffine(affine, result);
 
-  Serial.println(F("X:"));
   printU256Hex(affine.x);
-
-  Serial.println(F("Y:"));
   printU256Hex(affine.y);
 }
 
@@ -2636,7 +2551,6 @@ size_t sendClientKeyExchange(const Point &publicKey)
 
 void testECCMemory()
 {
-    Serial.println(F("=== ECC SRAM TEST ==="));
   modMulCount = 0;
 
     zero256(ecdhePrivate);
@@ -2646,35 +2560,18 @@ void testECCMemory()
 
     
 
-    Serial.println(F("Calculating client public key..."));
-    unsigned long startTime = millis();
     pointScalarMultiplyGeneratorProjective(
         ecdhePoint,
         ecdhePrivate);
     
-    Serial.print("Scalar multiplication ms = ");
-    Serial.println(millis() - startTime);
-    Serial.print(F("modMul count after scalar = "));
-    Serial.println(modMulCount);
-
-    Serial.println(F("M242 BEFORE projective -> affine"));
     printMemory();
 
     pointProjectiveToAffine(
         ecdheClientPublic,
         ecdhePoint);
 
-    Serial.print(F("modMul count after affine = "));
-    Serial.println(modMulCount);
-
-    Serial.println(F("Client public X:"));
     print256(ecdheClientPublic.x);
-
-    Serial.println(F("Client public Y:"));
     print256(ecdheClientPublic.y);
-
-    Serial.print(F("MIN FREE SRAM (testECCMemory) = "));
-    Serial.println(minFreeMemory);
 }
 uint16_t getFreeMemory()
 {
@@ -3548,37 +3445,17 @@ void showStage(uint8_t stage)
 
 void printIP(const IPAddress &ip)
 {
-    Serial.print(ip[0]);
-    Serial.print('.');
-    Serial.print(ip[1]);
-    Serial.print('.');
-    Serial.print(ip[2]);
-    Serial.print('.');
-    Serial.println(ip[3]);
 }
 bool testTCP(const char *hostname, uint16_t port)
 {
-    Serial.print("\nTCP: ");
-    Serial.print(hostname);
-    Serial.print(':');
-    Serial.println(port);
-
     unsigned long start = millis();
 
     if (client.connect(hostname, port))
     {
-        Serial.print("TCP CONNECTED in ");
-        Serial.print(millis() - start);
-        Serial.println(" ms");
-
         client.stop();
 
         return true;
     }
-
-    Serial.print("TCP FAILED after ");
-    Serial.print(millis() - start);
-    Serial.println(" ms");
 
     return false;
 }
@@ -3587,34 +3464,20 @@ bool testTCPByIP(
     uint16_t port
 )
 {
-    Serial.print("\nTCP by IP: ");
     printIP(ip);
-
-    Serial.print("Port: ");
-    Serial.println(port);
-
     unsigned long start = millis();
 
     if (client.connect(ip, port))
     {
-        Serial.print("TCP CONNECTED in ");
-        Serial.print(millis() - start);
-        Serial.println(" ms");
-
         client.stop();
 
         return true;
     }
 
-    Serial.print("TCP FAILED after ");
-    Serial.print(millis() - start);
-    Serial.println(" ms");
-
     return false;
 }
 void setup()
 {
-    Serial.begin(115200);
     delay(1000);
 
     if (Ethernet.begin(mac) == 0)
@@ -3638,130 +3501,6 @@ void setup()
 
     while (1);
 }
-
-// void setup()
-// {
-//     // --------------------------------------------------
-//     // LCD FIRST
-//     // --------------------------------------------------
-
-//     lcdInit();
-
-//     showStage(1);      // LCD initialized
-
-//     // --------------------------------------------------
-//     // SERIAL
-//     // --------------------------------------------------
-
-//     Serial.begin(115200);
-
-//     delay(1000);
-
-//     Serial.println();
-//     Serial.println("================================");
-//     Serial.println(" Ethernet + LCD diagnostic");
-//     Serial.println("================================");
-
-//     // --------------------------------------------------
-//     // DHCP
-//     // --------------------------------------------------
-
-//     showStage(2);
-
-//     Serial.println("\n[1] DHCP");
-
-//     int dhcpResult = Ethernet.begin(mac);
-
-//     if (dhcpResult == 0)
-//     {
-//         Serial.println("DHCP FAILED");
-
-//         showStage(20);
-
-//         while (1);
-//     }
-
-//     Serial.println("DHCP OK");
-
-//     // --------------------------------------------------
-//     // NETWORK INFORMATION
-//     // --------------------------------------------------
-
-//     showStage(3);
-
-//     Serial.println("\n[2] NETWORK");
-
-//     Serial.print("Local IP: ");
-//     printIP(Ethernet.localIP());
-
-//     Serial.print("Subnet:   ");
-//     printIP(Ethernet.subnetMask());
-
-//     Serial.print("Gateway:  ");
-//     printIP(Ethernet.gatewayIP());
-
-//     Serial.print("DNS:      ");
-//     printIP(Ethernet.dnsServerIP());
-
-//     // --------------------------------------------------
-//     // TCP BY IP
-//     // --------------------------------------------------
-
-//     showStage(4);
-
-//     Serial.println("\n[3] TCP BY IP");
-
-//     if (!testTCPByIP(
-//             IPAddress(142, 250, 72, 14),
-//             443))
-//     {
-//         showStage(24);
-//         while (1);
-//     }
-
-//     // --------------------------------------------------
-//     // GOOGLE HOSTNAME
-//     // --------------------------------------------------
-
-//     showStage(5);
-
-//     Serial.println("\n[4] TCP BY HOSTNAME");
-
-//     if (!testTCP(
-//             "api.binance.com",
-//             443))
-//     {
-//         showStage(25);
-//         while (1);
-//     }
-
-//     // --------------------------------------------------
-//     // BINANCE HOSTNAME
-//     // --------------------------------------------------
-
-//     showStage(6);
-
-//     if (!testTCP(
-//             "api.binance.com",
-//             443))
-//     {
-//         showStage(26);
-//         while (1);
-//     }
-
-//     // --------------------------------------------------
-//     // SUCCESS
-//     // --------------------------------------------------
-
-//     Serial.println();
-//     Serial.println("================================");
-//     Serial.println(" DIAGNOSTIC COMPLETE");
-//     Serial.println("================================");
-
-//     showStage(99);
-
-//     while (1);
-// }
 
 void loop()
 {
