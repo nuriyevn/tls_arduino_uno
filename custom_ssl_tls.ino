@@ -414,30 +414,51 @@ void modSub256(  U256 &result,  const U256 &a,  const U256 &b)
 
 void modMul256(U256 &result, const U256 &a, const U256 &b)
 {
-  U256 x;
-  U256 y;
+    U256 temp;
 
-  copy256(x, a);
-  copy256(y, b);
-  zero256(result);
+    const U256 *x;
+    const U256 *y;
 
-  // result = result * 2 + current bit of b
-  // Process b from most significant bit to least significant bit.
-  for (int i = 31; i >= 0; i--)
-  {
-    uint8_t value = y.v[i];
-
-    for (int bit = 7; bit >= 0; bit--)
+    if (&result == &a && &result == &b)
     {
-      modAdd256(result, result, result);
-
-      if (value & (1 << bit))
-      {
-        modAdd256(result, result, x);
-      }
+        copy256(temp, a);
+        x = &temp;
+        y = &temp;
     }
-  }
+    else if (&result == &a)
+    {
+        copy256(temp, a);
+        x = &temp;
+        y = &b;
+    }
+    else if (&result == &b)
+    {
+        copy256(temp, b);
+        x = &a;
+        y = &temp;
+    }
+    else
+    {
+        x = &a;
+        y = &b;
+    }
+
+    zero256(result);
+
+    for (int i = 31; i >= 0; i--)
+    {
+        uint8_t value = y->v[i];
+
+        for (int bit = 7; bit >= 0; bit--)
+        {
+            modAdd256(result, result, result);
+
+            if (value & (1 << bit))
+                modAdd256(result, result, *x);
+        }
+    }
 }
+
 void set256(  U256 &result,  uint32_t value)
 {
   zero256(result);
