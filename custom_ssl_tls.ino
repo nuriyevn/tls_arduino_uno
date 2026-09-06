@@ -1,10 +1,11 @@
 #include <SPI.h>
 #include <Ethernet.h>
 #include <avr/pgmspace.h>
-
+#define DEBUG_TLS_ALERTS 0
 byte mac[] = {
   0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED
 };
+
 struct U256
 {
   uint8_t v[32];
@@ -14,6 +15,28 @@ struct Point
   U256 x;
   U256 y;
 };
+U256 ecdheSharedSecret;
+uint8_t serverRandom[32];
+uint16_t selectedCipherSuite = 0;
+U256 tlsMasterSecretPart1;
+U256 tlsMasterSecretPart2;
+uint8_t tlsMasterSecret[48];
+uint8_t clientWriteKey[16];
+uint8_t serverWriteKey[16];
+
+uint8_t clientWriteIV[4];
+uint8_t serverWriteIV[4];
+uint8_t clientRandom[32];
+uint8_t tlsKeyBlock[40];
+
+
+struct SHA256Context
+{
+  uint32_t state[8];
+  uint64_t bitCount;
+  uint8_t buffer[64];
+};
+
 
 // 256-bit integer helpers Internal representation:
 //   v[0]  = least significant byte    v[31] = most significant byte
@@ -203,36 +226,28 @@ void modMul256(U256 &result, const U256 &a, const U256 &b)
 {
   U256 x;
   U256 y;
-  U256 r;
 
   copy256(x, a);
   copy256(y, b);
-  zero256(r);
+  zero256(result);
 
-  for (int i = 0; i < 256; i++)
+  // result = result * 2 + current bit of b
+  // Process b from most significant bit to least significant bit.
+  for (int i = 31; i >= 0; i--)
   {
-    if (y.v[0] & 1)
+    uint8_t value = y.v[i];
+
+    for (int bit = 7; bit >= 0; bit--)
     {
-      modAdd256(r, r, x);
-    }
+      modAdd256(result, result, result);
 
-    // x = 2*x mod p
-    modAdd256(x, x, x);
-
-    // y >>= 1
-    uint8_t carry = 0;
-
-    for (int j = 31; j >= 0; j--)
-    {
-      uint8_t newCarry = y.v[j] & 1;
-      y.v[j] = (y.v[j] >> 1) | (carry << 7);
-      carry = newCarry;
+      if (value & (1 << bit))
+      {
+        modAdd256(result, result, x);
+      }
     }
   }
-
-  copy256(result, r);
 }
-
 void set256(  U256 &result,  uint32_t value)
 {
   zero256(result);
@@ -256,11 +271,430 @@ void print256(const U256 &value)
 }
 
 
+const uint32_t SHA256_K[64] PROGMEM =
+{
+  0x428A2F98UL, 0x71374491UL, 0xB5C0FBCFUL, 0xE9B5DBA5UL,
+  0x3956C25BUL, 0x59F111F1UL, 0x923F82A4UL, 0xAB1C5ED5UL,
+  0xD807AA98UL, 0x12835B01UL, 0x243185BEUL, 0x550C7DC3UL,
+  0x72BE5D74UL, 0x80DEB1FEUL, 0x9BDC06A7UL, 0xC19BF174UL,
+  0xE49B69C1UL, 0xEFBE4786UL, 0x0FC19DC6UL, 0x240CA1CCUL,
+  0x2DE92C6FUL, 0x4A7484AAUL, 0x5CB0A9DCUL, 0x76F988DAUL,
+  0x983E5152UL, 0xA831C66DUL, 0xB00327C8UL, 0xBF597FC7UL,
+  0xC6E00BF3UL, 0xD5A79147UL, 0x06CA6351UL, 0x14292967UL,
+  0x27B70A85UL, 0x2E1B2138UL, 0x4D2C6DFCUL, 0x53380D13UL,
+  0x650A7354UL, 0x766A0ABBUL, 0x81C2C92EUL, 0x92722C85UL,
+  0xA2BFE8A1UL, 0xA81A664BUL, 0xC24B8B70UL, 0xC76C51A3UL,
+  0xD192E819UL, 0xD6990624UL, 0xF40E3585UL, 0x106AA070UL,
+  0x19A4C116UL, 0x1E376C08UL, 0x2748774CUL, 0x34B0BCB5UL,
+  0x391C0CB3UL, 0x4ED8AA4AUL, 0x5B9CCA4FUL, 0x682E6FF3UL,
+  0x748F82EEUL, 0x78A5636FUL, 0x84C87814UL, 0x8CC70208UL,
+  0x90BEFFFAUL, 0xA4506CEBUL, 0xBEF9A3F7UL, 0xC67178F2UL
+};
+
+uint32_t rotr32(uint32_t x, uint8_t n)
+{
+  return (x >> n) | (x << (32 - n));
+}
+
+uint32_t sha256Ch(uint32_t x, uint32_t y, uint32_t z)
+{
+  return (x & y) ^ (~x & z);
+}
+
+uint32_t sha256Maj(uint32_t x, uint32_t y, uint32_t z)
+{
+  return (x & y) ^ (x & z) ^ (y & z);
+}
+
+uint32_t sha256BigSigma0(uint32_t x)
+{
+  return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
+}
+
+uint32_t sha256BigSigma1(uint32_t x)
+{
+  return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
+}
+
+uint32_t sha256SmallSigma0(uint32_t x)
+{
+  return rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3);
+}
+
+uint32_t sha256SmallSigma1(uint32_t x)
+{
+  return rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10);
+}
+
+void sha256Init(SHA256Context &ctx)
+{
+  ctx.state[0] = 0x6A09E667UL;
+  ctx.state[1] = 0xBB67AE85UL;
+  ctx.state[2] = 0x3C6EF372UL;
+  ctx.state[3] = 0xA54FF53AUL;
+  ctx.state[4] = 0x510E527FUL;
+  ctx.state[5] = 0x9B05688CUL;
+  ctx.state[6] = 0x1F83D9ABUL;
+  ctx.state[7] = 0x5BE0CD19UL;
+
+  ctx.bitCount = 0;
+}
+
+void sha256Transform(SHA256Context &ctx, const uint8_t *data)
+{
+  uint32_t w[64];
+
+  for (uint8_t i = 0; i < 16; i++)
+  {
+    uint8_t j = i * 4;
+
+    w[i] =
+        ((uint32_t)data[j] << 24) |
+        ((uint32_t)data[j + 1] << 16) |
+        ((uint32_t)data[j + 2] << 8) |
+        ((uint32_t)data[j + 3]);
+  }
+
+  for (uint8_t i = 16; i < 64; i++)
+  {
+    w[i] =
+        sha256SmallSigma1(w[i - 2]) +
+        w[i - 7] +
+        sha256SmallSigma0(w[i - 15]) +
+        w[i - 16];
+  }
+
+  uint32_t a = ctx.state[0];
+  uint32_t b = ctx.state[1];
+  uint32_t c = ctx.state[2];
+  uint32_t d = ctx.state[3];
+  uint32_t e = ctx.state[4];
+  uint32_t f = ctx.state[5];
+  uint32_t g = ctx.state[6];
+  uint32_t h = ctx.state[7];
+
+  for (uint8_t i = 0; i < 64; i++)
+  {
+    uint32_t k = pgm_read_dword(&SHA256_K[i]);
+
+    uint32_t t1 =
+        h +
+        sha256BigSigma1(e) +
+        sha256Ch(e, f, g) +
+        k +
+        w[i];
+
+    uint32_t t2 =
+        sha256BigSigma0(a) +
+        sha256Maj(a, b, c);
+
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+  }
+
+  ctx.state[0] += a;
+  ctx.state[1] += b;
+  ctx.state[2] += c;
+  ctx.state[3] += d;
+  ctx.state[4] += e;
+  ctx.state[5] += f;
+  ctx.state[6] += g;
+  ctx.state[7] += h;
+}
+
+void sha256Update(
+    SHA256Context &ctx,
+    const uint8_t *data,
+    uint16_t length)
+{
+  uint16_t index =
+      (uint16_t)((ctx.bitCount >> 3) & 0x3F);
+
+  ctx.bitCount += (uint64_t)length * 8;
+
+  for (uint16_t i = 0; i < length; i++)
+  {
+    ctx.buffer[index++] = data[i];
+
+    if (index == 64)
+    {
+      sha256Transform(ctx, ctx.buffer);
+      index = 0;
+    }
+  }
+}
+
+void sha256UpdateByte(
+    SHA256Context &ctx,
+    uint8_t value)
+{
+  sha256Update(ctx, &value, 1);
+}
+
+void sha256Final(
+    SHA256Context &ctx,
+    uint8_t digest[32])
+{
+  uint16_t index =
+      (uint16_t)((ctx.bitCount >> 3) & 0x3F);
+
+  ctx.buffer[index++] = 0x80;
+
+  if (index > 56)
+  {
+    while (index < 64)
+      ctx.buffer[index++] = 0;
+
+    sha256Transform(ctx, ctx.buffer);
+    index = 0;
+  }
+
+  while (index < 56)
+    ctx.buffer[index++] = 0;
+
+  uint64_t bits = ctx.bitCount;
+
+  for (int i = 7; i >= 0; i--)
+  {
+    ctx.buffer[index++] = (uint8_t)(bits >> (i * 8));
+  }
+
+  sha256Transform(ctx, ctx.buffer);
+
+  for (uint8_t i = 0; i < 8; i++)
+  {
+    digest[i * 4] =
+        (uint8_t)(ctx.state[i] >> 24);
+
+    digest[i * 4 + 1] =
+        (uint8_t)(ctx.state[i] >> 16);
+
+    digest[i * 4 + 2] =
+        (uint8_t)(ctx.state[i] >> 8);
+
+    digest[i * 4 + 3] =
+        (uint8_t)ctx.state[i];
+  }
+}
+
+
+void hmacSha256(const uint8_t *key, uint8_t keyLength, const uint8_t *data, uint16_t dataLength, uint8_t output[32])
+{
+  uint8_t keyBlock[64];
+
+  for (uint8_t i = 0; i < 64; i++)
+    keyBlock[i] = 0;
+
+  if (keyLength > 64)
+  {
+    SHA256Context keyHash;
+    uint8_t digest[32];
+
+    sha256Init(keyHash);
+    sha256Update(keyHash, key, keyLength);
+    sha256Final(keyHash, digest);
+
+    for (uint8_t i = 0; i < 32; i++)
+      keyBlock[i] = digest[i];
+  }
+  else
+  {
+    for (uint8_t i = 0; i < keyLength; i++)
+      keyBlock[i] = key[i];
+  }
+
+  SHA256Context ctx;
+
+  for (uint8_t i = 0; i < 64; i++)
+    keyBlock[i] ^= 0x36;
+
+  sha256Init(ctx);
+  sha256Update(ctx, keyBlock, 64);
+  sha256Update(ctx, data, dataLength);
+
+  uint8_t innerHash[32];
+  sha256Final(ctx, innerHash);
+
+  for (uint8_t i = 0; i < 64; i++)
+    keyBlock[i] ^= 0x36 ^ 0x5C;
+
+  sha256Init(ctx);
+  sha256Update(ctx, keyBlock, 64);
+  sha256Update(ctx, innerHash, 32);
+  sha256Final(ctx, output);
+}
+
+void tlsPrfSha256(
+    const uint8_t *secret,
+    uint8_t secretLength,
+    const uint8_t *label,
+    uint8_t labelLength,
+    const uint8_t *seed,
+    uint8_t seedLength,
+    uint8_t *output,
+    uint16_t outputLength)
+{
+    uint8_t labelSeed[64];
+    uint8_t A[32];
+    uint8_t nextA[32];
+    uint8_t input[96];
+    uint8_t block[32];
+
+    uint8_t labelSeedLength =
+        labelLength + seedLength;
+
+    for (uint8_t i = 0; i < labelLength; i++)
+        labelSeed[i] = label[i];
+
+    for (uint8_t i = 0; i < seedLength; i++)
+        labelSeed[labelLength + i] = seed[i];
+
+    /*
+     * A(1) = HMAC(secret, label + seed)
+     */
+    hmacSha256(
+        secret,
+        secretLength,
+        labelSeed,
+        labelSeedLength,
+        A
+    );
+
+    uint16_t produced = 0;
+
+    while (produced < outputLength)
+    {
+        /*
+         * P_hash block:
+         *
+         * HMAC(secret, A(i) + label + seed)
+         */
+
+        for (uint8_t i = 0; i < 32; i++)
+            input[i] = A[i];
+
+        for (uint8_t i = 0; i < labelSeedLength; i++)
+            input[32 + i] = labelSeed[i];
+
+        hmacSha256(
+            secret,
+            secretLength,
+            input,
+            32 + labelSeedLength,
+            block
+        );
+
+        uint16_t remaining =
+            outputLength - produced;
+
+        uint8_t copyLength =
+            remaining < 32 ? remaining : 32;
+
+        for (uint8_t i = 0; i < copyLength; i++)
+            output[produced + i] = block[i];
+
+        produced += copyLength;
+
+        /*
+         * A(i+1) = HMAC(secret, A(i))
+         */
+        hmacSha256(
+            secret,
+            secretLength,
+            A,
+            32,
+            nextA
+        );
+
+        for (uint8_t i = 0; i < 32; i++)
+            A[i] = nextA[i];
+    }
+}
+
+void deriveTLSKeys()
+{
+    uint8_t masterSeed[64];
+    uint8_t keySeed[64];
+
+    /*
+     * master_secret =
+     * PRF(pre_master_secret,
+     *     "master secret",
+     *     ClientHello.random + ServerHello.random)
+     */
+
+    for (uint8_t i = 0; i < 32; i++)
+    {
+        masterSeed[i] = clientRandom[i];
+        masterSeed[32 + i] = serverRandom[i];
+    }
+
+    const uint8_t masterLabel[] = "master secret";
+
+    tlsPrfSha256(
+        ecdheSharedSecret.v,
+        32,
+        masterLabel,
+        13,
+        masterSeed,
+        64,
+        tlsMasterSecret,
+        48
+    );
+
+    /*
+     * key_block =
+     * PRF(master_secret,
+     *     "key expansion",
+     *     ServerHello.random + ClientHello.random)
+     */
+
+    for (uint8_t i = 0; i < 32; i++)
+    {
+        keySeed[i] = serverRandom[i];
+        keySeed[32 + i] = clientRandom[i];
+    }
+
+    const uint8_t keyLabel[] = "key expansion";
+
+    tlsPrfSha256(
+        tlsMasterSecret,
+        48,
+        keyLabel,
+        13,
+        keySeed,
+        64,
+        tlsKeyBlock,
+        40
+    );
+
+    /*
+     * Split key_block
+     */
+
+    for (uint8_t i = 0; i < 16; i++)
+        clientWriteKey[i] = tlsKeyBlock[i];
+
+    for (uint8_t i = 0; i < 16; i++)
+        serverWriteKey[i] = tlsKeyBlock[16 + i];
+
+    for (uint8_t i = 0; i < 4; i++)
+        clientWriteIV[i] = tlsKeyBlock[32 + i];
+
+    for (uint8_t i = 0; i < 4; i++)
+        serverWriteIV[i] = tlsKeyBlock[36 + i];
+}
+
 EthernetClient client;
 
 struct ECCWorkspace
 {
-  U256 scalar;
   Point point1;
   // Point point2; //optimized out
 
@@ -281,6 +715,11 @@ struct PointProjective
 
 
 ECCWorkspace ecc;
+
+Point ecdheClientPublic;
+U256 ecdhePrivate;
+
+
 void pointDoubleProjective(PointProjective &p);
 void pointDoubleProjective(PointProjective &p)
 {
@@ -305,30 +744,33 @@ void pointDoubleProjective(PointProjective &p)
   modMul256(ecc.temp2, ecc.temp2, ecc.temp2);
   modSub256(ecc.temp1, ecc.temp1, ecc.temp2);
 
-  set256(ecc.scalar, 3);
-  modMul256(ecc.scalar, ecc.temp1, ecc.scalar);
+  set256(ecc.temp2, 3);
+  modMul256(ecc.temp1, ecc.temp1, ecc.temp2);
 
-  // F = E²
-  modMul256(ecc.temp1, ecc.scalar, ecc.scalar);
-
-  // X3 = F - 2D
-  modAdd256(ecc.temp2, ecc.temp4, ecc.temp4);
-  modSub256(p.x, ecc.temp1, ecc.temp2);
-
-  // Z3 = 2Y1Z1
+  // Z3 = 2 * Y1 * Z1
+  // Old Y1 is no longer needed after this.
   modMul256(ecc.temp2, p.y, p.z);
   modAdd256(p.z, ecc.temp2, ecc.temp2);
 
+  // F = E²
+  modMul256(ecc.temp2, ecc.temp1, ecc.temp1);
+
+  // 2D — use p.y as scratch.
+  modAdd256(p.y, ecc.temp4, ecc.temp4);
+
+  // X3 = F - 2D
+  modSub256(p.x, ecc.temp2, p.y);
+
   // Y3 = E(D - X3) - 8C
   modSub256(ecc.temp2, ecc.temp4, p.x);
-  modMul256(ecc.temp2, ecc.scalar, ecc.temp2);
+  modMul256(ecc.temp2, ecc.temp1, ecc.temp2);
 
   // 8C
-  modAdd256(ecc.temp1, ecc.temp3, ecc.temp3);
-  modAdd256(ecc.temp1, ecc.temp1, ecc.temp1);
-  modAdd256(ecc.temp1, ecc.temp1, ecc.temp1);
+  modAdd256(ecc.temp3, ecc.temp3, ecc.temp3);
+  modAdd256(ecc.temp3, ecc.temp3, ecc.temp3);
+  modAdd256(ecc.temp3, ecc.temp3, ecc.temp3);
 
-  modSub256(p.y, ecc.temp2, ecc.temp1);
+  modSub256(p.y, ecc.temp2, ecc.temp3);
 }
 
 void printMemory()
@@ -342,7 +784,7 @@ void printMemory()
       &stackVariable -
       (__brkval ? __brkval : &__heap_start);
 
-  Serial.print("Free SRAM: ");
+  Serial.print(F("Free SRAM: "));
   Serial.println(freeMemory);
 }
 
@@ -444,6 +886,13 @@ void printHexPROGMEM(
 size_t sendClientHello()
 {
   size_t sent = 0;
+
+  /*
+   * ClientHello.random starts at byte 11
+   * and is 32 bytes long.
+   */
+  for (uint8_t i = 0; i < 32; i++)
+    clientRandom[i] = pgm_read_byte(&clientHello[11 + i]);
 
   for (uint16_t i = 0; i < clientHelloLength; i++)
   {
@@ -555,11 +1004,11 @@ bool consumeTLSBytes(uint16_t count)
 void parseCertificate(const uint8_t *data, size_t len)
 {
     Serial.println();
-    Serial.println("=== Certificate ===");
+    Serial.println(F("=== Certificate ==="));
     size_t p = 0;
     if (len < 4)
     {
-        Serial.println("Certificate message too short.");
+        Serial.println(F("Certificate message too short."));
         return;
     }
     // TLS Handshake header
@@ -570,18 +1019,18 @@ void parseCertificate(const uint8_t *data, size_t len)
         ((uint32_t)data[p + 1] << 8) |
         data[p + 2];
     p += 3;
-    Serial.print("Handshake type: 0x");
+    Serial.print(F("Handshake type: 0x"));
     Serial.println(handshakeType, HEX);
-    Serial.print("Handshake length: ");
+    Serial.print(F("Handshake length: "));
     Serial.println(handshakeLength);
     if (handshakeType != 0x0B)
     {
-        Serial.println("Not a Certificate message.");
+        Serial.println(F("Not a Certificate message."));
         return;
     }
     if (p + 3 > len)
     {
-        Serial.println("Missing certificate list length.");
+        Serial.println(F("Missing certificate list length."));
         return;
     }
     // certificate_list_length
@@ -590,14 +1039,14 @@ void parseCertificate(const uint8_t *data, size_t len)
         ((uint32_t)data[p + 1] << 8) |
         data[p + 2];
     p += 3;
-    Serial.print("Certificate list length: ");
+    Serial.print(F("Certificate list length: "));
     Serial.println(certificateListLength);
 
     size_t listEnd = p + certificateListLength;
 
     if (listEnd > len)
     {
-        Serial.println("Certificate list exceeds received data.");
+        Serial.println(F("Certificate list exceeds received data."));
         return;
     }
 
@@ -607,7 +1056,7 @@ void parseCertificate(const uint8_t *data, size_t len)
     {
         if (p + 3 > listEnd)
         {
-            Serial.println("Missing certificate length.");
+            Serial.println(F("Missing certificate length."));
             return;
         }
 
@@ -620,20 +1069,20 @@ void parseCertificate(const uint8_t *data, size_t len)
 
         certificateNumber++;
 
-        Serial.print("Certificate #");
+        Serial.print(F("Certificate #"));
         Serial.print(certificateNumber);
-        Serial.print(" length: ");
+        Serial.print(F(" length: "));
         Serial.println(certificateLength);
 
         if (p + certificateLength > listEnd)
         {
-            Serial.println("Certificate exceeds certificate list.");
+            Serial.println(F("Certificate exceeds certificate list."));
             return;
         }
 
-        Serial.print("Certificate #");
+        Serial.print(F("Certificate #"));
         Serial.print(certificateNumber);
-        Serial.println(" first bytes:");
+        Serial.println(F(" first bytes:"));
 
         size_t previewLength = certificateLength < 16
                              ? certificateLength
@@ -660,13 +1109,13 @@ void parseCertificate(const uint8_t *data, size_t len)
         // so there is no per-certificate extensions field here.
     }
 
-    Serial.print("Certificates found: ");
+    Serial.print(F("Certificates found: "));
     Serial.println(certificateNumber);
 
     if (p == listEnd)
-        Serial.println("Certificate list parsed successfully.");
+        Serial.println(F("Certificate list parsed successfully."));
     else
-        Serial.println("Certificate list parsing ended unexpectedly.");
+        Serial.println(F("Certificate list parsing ended unexpectedly."));
 }
 
 
@@ -776,12 +1225,11 @@ uint8_t pMinus2Byte256(int i)
 void modInverse256(U256 &result, const U256 &a)
 {
   U256 base;
-  U256 r;
 
   copy256(base, a);
 
-  zero256(r);
-  r.v[0] = 1;
+  zero256(result);
+  result.v[0] = 1;
 
   // Process p - 2 from most significant bit to least significant bit.
   for (int i = 0; i < 32; i++)
@@ -790,18 +1238,16 @@ void modInverse256(U256 &result, const U256 &a)
 
     for (int bit = 7; bit >= 0; bit--)
     {
-      // r = r² mod p
-      modMul256(r, r, r);
+      // result = result² mod p
+      modMul256(result, result, result);
 
       if (exponentByte & (1 << bit))
       {
-        // r = r * base mod p
-        modMul256(r, r, base);
+        // result = result * base mod p
+        modMul256(result, result, base);
       }
     }
   }
-
-  copy256(result, r);
 }
 
 void pointDouble(Point &result, const Point &p)
@@ -809,75 +1255,43 @@ void pointDouble(Point &result, const Point &p)
   // temp1 = x²
   modMul256(ecc.temp1, p.x, p.x);
 
-  // scalar = 3
-  set256(ecc.scalar, 3);
+  // temp4 = 3
+  set256(ecc.temp4, 3);
 
   // temp2 = 3x²
-  modMul256(ecc.temp2, ecc.temp1, ecc.scalar);
+  modMul256(ecc.temp2, ecc.temp1, ecc.temp4);
 
   // temp2 = 3x² - 3
-  modSub256(ecc.temp2, ecc.temp2, ecc.scalar);
+  modSub256(ecc.temp2, ecc.temp2, ecc.temp4);
 
   // temp3 = 2y
   modAdd256(ecc.temp3, p.y, p.y);
 
-  // scalar = inverse(2y)
-  modInverse256(ecc.scalar, ecc.temp3);
+  // temp4 = inverse(2y)
+  modInverse256(ecc.temp4, ecc.temp3);
 
   // temp2 = λ
-  modMul256(ecc.temp2, ecc.temp2, ecc.scalar);
+  modMul256(ecc.temp2, ecc.temp2, ecc.temp4);
 
   // temp3 = λ²
   modMul256(ecc.temp3, ecc.temp2, ecc.temp2);
 
-  // scalar = 2x
-  modAdd256(ecc.scalar, p.x, p.x);
+  // temp4 = 2x
+  modAdd256(ecc.temp4, p.x, p.x);
 
   // result.x = λ² - 2x
-  modSub256(result.x, ecc.temp3, ecc.scalar);
+  modSub256(result.x, ecc.temp3, ecc.temp4);
 
   // temp3 = x - result.x
   modSub256(ecc.temp3, p.x, result.x);
 
-  // scalar = λ(x - result.x)
-  modMul256(ecc.scalar, ecc.temp2, ecc.temp3);
+  // temp4 = λ(x - result.x)
+  modMul256(ecc.temp4, ecc.temp2, ecc.temp3);
 
   // result.y = λ(x - result.x) - y
-  modSub256(result.y, ecc.scalar, p.y);
+  modSub256(result.y, ecc.temp4, p.y);
 }
 
-void pointAdd(Point &result, const Point &p, const Point &q)
-{
-  // temp1 = y2 - y1
-  modSub256(ecc.temp1, q.y, p.y);
-
-  // temp2 = x2 - x1
-  modSub256(ecc.temp2, q.x, p.x);
-
-  // scalar = inverse(x2 - x1)
-  modInverse256(ecc.scalar, ecc.temp2);
-
-  // temp1 = λ
-  modMul256(ecc.temp1, ecc.temp1, ecc.scalar);
-
-  // temp3 = λ²
-  modMul256(ecc.temp3, ecc.temp1, ecc.temp1);
-
-  // scalar = λ² - x1
-  modSub256(ecc.scalar, ecc.temp3, p.x);
-
-  // result.x = λ² - x1 - x2
-  modSub256(result.x, ecc.scalar, q.x);
-
-  // temp3 = x1 - result.x
-  modSub256(ecc.temp3, p.x, result.x);
-
-  // scalar = λ(x1 - result.x)
-  modMul256(ecc.scalar, ecc.temp1, ecc.temp3);
-
-  // result.y = λ(x1 - result.x) - y1
-  modSub256(result.y, ecc.scalar, p.y);
-}
 void pointProjectiveToAffine(Point &result, const PointProjective &p);
 void pointProjectiveToAffine(Point &result, const PointProjective &p)
 {
@@ -896,7 +1310,32 @@ void pointProjectiveToAffine(Point &result, const PointProjective &p)
   // y = Y / Z³
   modMul256(result.y, p.y, ecc.temp1);
 }
+void pointAdd(Point &result, const Point &p, const Point &q)
+{
+  // λ = (qy - py) / (qx - px)
+  modSub256(ecc.temp1, q.y, p.y);
+  modSub256(ecc.temp2, q.x, p.x);
 
+  // inverse(qx - px)
+  modInverse256(ecc.temp4, ecc.temp2);
+
+  // λ
+  modMul256(ecc.temp1, ecc.temp1, ecc.temp4);
+
+  // λ²
+  modMul256(ecc.temp3, ecc.temp1, ecc.temp1);
+
+  // x3 = λ² - px - qx
+  modSub256(ecc.temp4, ecc.temp3, p.x);
+  modSub256(result.x, ecc.temp4, q.x);
+
+  // λ(px - x3)
+  modSub256(ecc.temp3, p.x, result.x);
+  modMul256(ecc.temp4, ecc.temp1, ecc.temp3);
+
+  // y3 = λ(px - x3) - py
+  modSub256(result.y, ecc.temp4, p.y);
+}
 bool isZero256(const U256 &a)
 {
   for (int i = 0; i < 32; i++)
@@ -922,40 +1361,22 @@ void pointAddAffineProjective(PointProjective &result, const Point &p)
     return;
   }
 
-  // --------------------------------------------------
   // Z1²
-  // temp1 = Z1²
-  // --------------------------------------------------
   modMul256(ecc.temp1, result.z, result.z);
 
-  // --------------------------------------------------
   // U2 = X2 * Z1²
-  // temp2 = U2
-  // --------------------------------------------------
   modMul256(ecc.temp2, p.x, ecc.temp1);
 
-  // --------------------------------------------------
   // Z1³
-  // temp3 = Z1³
-  // --------------------------------------------------
   modMul256(ecc.temp3, ecc.temp1, result.z);
 
-  // --------------------------------------------------
   // S2 = Y2 * Z1³
-  // temp3 = S2
-  // --------------------------------------------------
   modMul256(ecc.temp3, p.y, ecc.temp3);
 
-  // --------------------------------------------------
   // H = U2 - X1
-  // temp2 = H
-  // --------------------------------------------------
   modSub256(ecc.temp2, ecc.temp2, result.x);
 
-  // --------------------------------------------------
   // R = S2 - Y1
-  // temp3 = R
-  // --------------------------------------------------
   modSub256(ecc.temp3, ecc.temp3, result.y);
 
   // H == 0?
@@ -976,46 +1397,31 @@ void pointAddAffineProjective(PointProjective &result, const Point &p)
     return;
   }
 
-  // --------------------------------------------------
   // H²
-  // temp1 = H²
-  // --------------------------------------------------
   modMul256(ecc.temp1, ecc.temp2, ecc.temp2);
 
-  // --------------------------------------------------
   // H³
-  // temp4 = H³
-  // --------------------------------------------------
   modMul256(ecc.temp4, ecc.temp1, ecc.temp2);
 
-  // --------------------------------------------------
-  // V = X1 * H²
-  // scalar = V
-  // --------------------------------------------------
-  modMul256(ecc.scalar, result.x, ecc.temp1);
-
-  // --------------------------------------------------
   // Z3 = Z1 * H
-  //
-  // Do this BEFORE temp2 is reused.
-  // --------------------------------------------------
-  modMul256(result.z, result.z, ecc.temp2);
+  // temp2 still contains H here.
+  modMul256(ecc.temp2, result.z, ecc.temp2);
+  copy256(result.z, ecc.temp2);
 
-  // --------------------------------------------------
+  // V = X1 * H²
+  // Keep V in temp1 because result.x must become X3.
+  modMul256(ecc.temp1, result.x, ecc.temp1);
+
   // X3 = R² - H³ - 2V
-  // --------------------------------------------------
   modMul256(result.x, ecc.temp3, ecc.temp3);
-
   modSub256(result.x, result.x, ecc.temp4);
 
-  modAdd256(ecc.temp2, ecc.scalar, ecc.scalar);
+  modAdd256(ecc.temp2, ecc.temp1, ecc.temp1);
 
   modSub256(result.x, result.x, ecc.temp2);
 
-  // --------------------------------------------------
   // Y3 = R(V - X3) - Y1*H³
-  // --------------------------------------------------
-  modSub256(ecc.temp2, ecc.scalar, result.x);
+  modSub256(ecc.temp2, ecc.temp1, result.x);
 
   modMul256(ecc.temp2, ecc.temp3, ecc.temp2);
 
@@ -1037,9 +1443,7 @@ void pointSetProjectiveGenerator(PointProjective &p)
 void pointAddAffineProjectiveProgmem(PointProjective &result, const uint8_t *px, const uint8_t *py);
 void pointAddAffineProjectiveProgmem(PointProjective &result, const uint8_t *px, const uint8_t *py)
 {
-  // --------------------------------------------------
   // Infinity + P = P
-  // --------------------------------------------------
   if (isZero256(result.z))
   {
     fromBigEndianProgmem(result.x, px);
@@ -1051,67 +1455,38 @@ void pointAddAffineProjectiveProgmem(PointProjective &result, const uint8_t *px,
     return;
   }
 
-  // --------------------------------------------------
   // Z1²
-  //
-  // temp1 = Z1²
-  // --------------------------------------------------
   modMul256(ecc.temp1, result.z, result.z);
 
-  // --------------------------------------------------
   // U2 = X2 * Z1²
-  //
-  // Load X2 directly from PROGMEM into temp2.
-  // temp2 = U2
-  // --------------------------------------------------
   fromBigEndianProgmem(ecc.temp2, px);
   modMul256(ecc.temp2, ecc.temp2, ecc.temp1);
 
-  // --------------------------------------------------
   // Z1³
-  //
-  // scalar = Z1³
-  // --------------------------------------------------
-  modMul256(ecc.scalar, ecc.temp1, result.z);
+  // temp4 is used instead of scalar.
+  modMul256(ecc.temp4, ecc.temp1, result.z);
 
-  // --------------------------------------------------
   // S2 = Y2 * Z1³
-  //
-  // Load Y2 directly from PROGMEM into temp3.
-  // temp3 = S2
-  // --------------------------------------------------
   fromBigEndianProgmem(ecc.temp3, py);
-  modMul256(ecc.temp3, ecc.temp3, ecc.scalar);
+  modMul256(ecc.temp3, ecc.temp3, ecc.temp4);
 
-  // --------------------------------------------------
   // H = U2 - X1
-  //
-  // temp2 = H
-  // --------------------------------------------------
   modSub256(ecc.temp2, ecc.temp2, result.x);
 
-  // --------------------------------------------------
   // R = S2 - Y1
-  //
-  // temp3 = R
-  // --------------------------------------------------
   modSub256(ecc.temp3, ecc.temp3, result.y);
 
-  // --------------------------------------------------
-  // Special cases
-  // --------------------------------------------------
+  // H == 0?
   if (isZero256(ecc.temp2))
   {
-    // H = 0 and R = 0 means P == result.
-    // Therefore result = 2 * result.
+    // Same point: R == 0 => doubling.
     if (isZero256(ecc.temp3))
     {
       pointDoubleProjective(result);
       return;
     }
 
-    // H = 0 and R != 0 means P == -result.
-    // Result is the point at infinity.
+    // Same X but different Y => point at infinity.
     zero256(result.x);
     zero256(result.y);
     zero256(result.z);
@@ -1119,60 +1494,36 @@ void pointAddAffineProjectiveProgmem(PointProjective &result, const uint8_t *px,
     return;
   }
 
-  // --------------------------------------------------
   // H²
-  //
-  // temp1 = H²
-  // --------------------------------------------------
   modMul256(ecc.temp1, ecc.temp2, ecc.temp2);
 
-  // --------------------------------------------------
   // H³
-  //
-  // temp4 = H³
-  // --------------------------------------------------
   modMul256(ecc.temp4, ecc.temp1, ecc.temp2);
 
-  // --------------------------------------------------
-  // V = X1 * H²
-  //
-  // scalar = V
-  // --------------------------------------------------
-  modMul256(ecc.scalar, result.x, ecc.temp1);
-
-  // --------------------------------------------------
   // Z3 = Z1 * H
-  //
-  // Do this before temp2 is reused.
-  // --------------------------------------------------
-  modMul256(result.z, result.z, ecc.temp2);
+  // temp2 still contains H here.
+  modMul256(ecc.temp2, result.z, ecc.temp2);
+  copy256(result.z, ecc.temp2);
 
-  // --------------------------------------------------
+  // V = X1 * H²
+  // Keep V in temp1 because result.x must become X3.
+  modMul256(ecc.temp1, result.x, ecc.temp1);
+
   // X3 = R² - H³ - 2V
-  // --------------------------------------------------
   modMul256(result.x, ecc.temp3, ecc.temp3);
-
   modSub256(result.x, result.x, ecc.temp4);
 
-  // temp2 = 2V
-  modAdd256(ecc.temp2, ecc.scalar, ecc.scalar);
+  modAdd256(ecc.temp2, ecc.temp1, ecc.temp1);
 
   modSub256(result.x, result.x, ecc.temp2);
 
-  // --------------------------------------------------
   // Y3 = R(V - X3) - Y1*H³
-  // --------------------------------------------------
+  modSub256(ecc.temp2, ecc.temp1, result.x);
 
-  // temp2 = V - X3
-  modSub256(ecc.temp2, ecc.scalar, result.x);
-
-  // temp2 = R(V - X3)
   modMul256(ecc.temp2, ecc.temp3, ecc.temp2);
 
-  // temp1 = Y1 * H³
   modMul256(ecc.temp1, result.y, ecc.temp4);
 
-  // Y3
   modSub256(result.y, ecc.temp2, ecc.temp1);
 }
 
@@ -1214,8 +1565,14 @@ void pointAddAffineProjectiveProgmem(PointProjective &result, const uint8_t *px,
 //     }
 //   }
 // }
-void pointScalarMultiplyProjective(    PointProjective &result,    const U256 &scalar,    const Point &point);
-void pointScalarMultiplyProjective(    PointProjective &result,    const U256 &scalar,    const Point &point)
+void __attribute__((noinline)) pointScalarMultiplyProjective(
+    PointProjective &result,
+    const U256 &scalar,
+    const Point &point);
+void __attribute__((noinline)) pointScalarMultiplyProjective(
+    PointProjective &result,
+    const U256 &scalar,
+    const Point &point)
 {
   zero256(result.x);
   zero256(result.y);
@@ -1268,13 +1625,15 @@ void pointProjectiveToAffineX(U256 &result, const PointProjective &p)
 
 void testScalarMultiplication()
 {
-  Serial.println("=== Scalar multiplication test ===");
+  Serial.println(F("=== Scalar multiplication test ==="));
 
   U256 k;
   zero256(k);
 
-  // k = 2
-  k.v[0] = 2;
+  // k = 3
+  //k.v[0] = 5;
+  for (int i = 0; i < 32; i++)
+    k.v[i] = 0x01;
 
   Point g;
 
@@ -1296,32 +1655,110 @@ void testScalarMultiplication()
   // Convert only X coordinate back to affine.
   pointProjectiveToAffineX(x, r);
 
-  Serial.println("2G X:");
+  Serial.println(F("2G X:"));
   print256(x);
 
-  Serial.println("=== End scalar multiplication test ===");
+  Serial.println(F("=== End scalar multiplication test ==="));
 }
+void printU256Hex(const U256 &a)
+{
+  for (int i = 0; i < 32; i++)
+  {
+    if (a.v[i] < 16)
+      Serial.print('0');
+
+    Serial.print(a.v[i], HEX);
+  }
+
+  Serial.println();
+}
+void testScalarMultiplicationProjective()
+{
+  Serial.println(F("Testing P-256 scalar multiplication..."));
+
+  U256 scalar;
+  Point generator;
+  PointProjective result;
+  Point affine;
+
+  // k = 1
+  zero256(scalar);
+  scalar.v[31] = 1;
+
+  // P-256 generator
+  fromBigEndianProgmem(generator.x, P256_GX_BE);
+  fromBigEndianProgmem(generator.y, P256_GY_BE);
+
+  pointScalarMultiplyProjective(result, scalar, generator);
+
+  pointProjectiveToAffine(affine, result);
+
+  Serial.println(F("X:"));
+  printU256Hex(affine.x);
+
+  Serial.println(F("Y:"));
+  printU256Hex(affine.y);
+}
+
+size_t sendClientKeyExchange(const Point &publicKey)
+{
+  size_t sent = 0;
+
+  // TLS record header
+  if (client.write((uint8_t)0x16) == 1) sent++;
+  if (client.write((uint8_t)0x03) == 1) sent++;
+  if (client.write((uint8_t)0x03) == 1) sent++;
+  if (client.write((uint8_t)0x00) == 1) sent++;
+  if (client.write((uint8_t)0x46) == 1) sent++;
+
+  // Handshake header
+  if (client.write((uint8_t)0x10) == 1) sent++;
+  if (client.write((uint8_t)0x00) == 1) sent++;
+  if (client.write((uint8_t)0x00) == 1) sent++;
+  if (client.write((uint8_t)0x42) == 1) sent++;
+
+  // ECPoint length = 65 bytes
+  if (client.write((uint8_t)0x41) == 1) sent++;
+
+  // Uncompressed point
+  if (client.write((uint8_t)0x04) == 1) sent++;
+
+  // X coordinate, big-endian
+  for (int i = 31; i >= 0; i--)
+  {
+    if (client.write(publicKey.x.v[i]) == 1)
+      sent++;
+  }
+
+  // Y coordinate, big-endian
+  for (int i = 31; i >= 0; i--)
+  {
+    if (client.write(publicKey.y.v[i]) == 1)
+      sent++;
+  }
+
+  return sent;
+}
+
 void setup()
 {
-  
   Serial.begin(115200);
-  Serial.println("MEMORY TEST 123456");
   delay(1000);
 
-  Serial.println("Starting Ethernet...");
+  Serial.println(F("Starting Ethernet..."));
 
   if (Ethernet.begin(mac) == 0)
   {
-    Serial.println("DHCP failed!");
+    Serial.println(F("DHCP failed!"));
 
-    Serial.print("IP address: ");
+    Serial.print(F("IP address: "));
     Serial.println(Ethernet.localIP());
 
     return;
   }
   delay(1000);
 
-  Serial.print("IP address: ");
+  Serial.print(F("IP address: "));
   Serial.println(Ethernet.localIP());
 
 
@@ -1334,15 +1771,14 @@ void setup()
   Serial.println(
     "Connecting to api.coinpaprika.com:443..."
   );
-
-  if (!client.connect("api.coinpaprika.com", 443))
+  if (!client.connect("api.binance.com", 443))
+  //if (!client.connect("api.coinpaprika.com", 443))
   {
-    Serial.println("TCP connection failed!");
+    Serial.println(F("TCP connection failed!"));
     return;
   }
   printMemory();
-  Serial.println("TCP connection established!");
-
+  Serial.println(F("TCP connection established!"));
 
 
   // =======================================================
@@ -1351,12 +1787,12 @@ void setup()
 
   Serial.println();
 
-  Serial.print("ClientHello size: ");
+  Serial.print(F("ClientHello size: "));
   Serial.println(clientHelloLength);
 
   Serial.println();
 
-  Serial.println("ClientHello bytes:");
+  Serial.println(F("ClientHello bytes:"));
   printHexPROGMEM(clientHello, clientHelloLength);
 
 
@@ -1366,14 +1802,14 @@ void setup()
 
   Serial.println();
 
-  Serial.println("Sending ClientHello...");
+  Serial.println(F("Sending ClientHello..."));
 
   size_t sent = sendClientHello();
 
-  Serial.print("Bytes sent: ");
+  Serial.print(F("Bytes sent: "));
   Serial.println(sent);
 
-  Serial.println("ClientHello sent!");
+  Serial.println(F("ClientHello sent!"));
 
 
 
@@ -1384,7 +1820,7 @@ void setup()
 
   Serial.println();
 
-  Serial.println("Waiting for TLS response...");
+  Serial.println(F("Waiting for TLS response..."));
 
   unsigned long start = millis();
   printMemory();
@@ -1395,7 +1831,7 @@ void setup()
     {
       Serial.println();
 
-      Serial.println("Received TLS bytes:");
+      Serial.println(F("Received TLS bytes:"));
 
       while (client.connected())
       {
@@ -1411,15 +1847,15 @@ void setup()
               versionMinor,
               recordLength))
         {
-          Serial.println("Could not read TLS record header.");
+          Serial.println(F("Could not read TLS record header."));
           break;
         }
 
 
         Serial.println();
-        Serial.println("=== TLS Record ===");
+        Serial.println(F("=== TLS Record ==="));
 
-        Serial.print("Content type: 0x");
+        Serial.print(F("Content type: 0x"));
 
         if (contentType < 0x10)
           Serial.print('0');
@@ -1427,14 +1863,14 @@ void setup()
         Serial.println(contentType, HEX);
 
 
-        Serial.print("TLS version: ");
+        Serial.print(F("TLS version: "));
 
         Serial.print(versionMajor);
-        Serial.print(".");
+        Serial.print(F("."));
         Serial.println(versionMinor);
 
 
-        Serial.print("Record length: ");
+        Serial.print(F("Record length: "));
         Serial.println(recordLength);
 
 
@@ -1459,7 +1895,7 @@ void setup()
 
           if (!readTLSByte(firstByte))
           {
-              Serial.println("Could not read handshake type.");
+              Serial.println(F("Could not read handshake type."));
               break;
           }
 
@@ -1467,7 +1903,7 @@ void setup()
           if (firstByte == 0x0E)
           {
               Serial.println();
-              Serial.println("ServerHelloDone received.");
+              Serial.println(F("ServerHelloDone received."));
 
               // We already consumed the handshake type.
               // ServerHelloDone has a 3-byte handshake length,
@@ -1480,23 +1916,182 @@ void setup()
                   !readTLSByte(b2) ||
                   !readTLSByte(b3))
               {
-                  Serial.println("Could not read ServerHelloDone length.");
+                  Serial.println(F("Could not read ServerHelloDone length."));
                   break;
               }
 
               if (b1 != 0 || b2 != 0 || b3 != 0)
               {
-                  Serial.println("Invalid ServerHelloDone length.");
+                  Serial.println(F("Invalid ServerHelloDone length."));
                   break;
               }
 
-              Serial.println("ServerHelloDone parsed.");
+              Serial.println(F("ServerHelloDone parsed."));
 
+              // -------------------------------------------------------
+              // ClientKeyExchange
+              // -------------------------------------------------------
+
+              Serial.println(F("Sending ClientKeyExchange..."));
+
+              size_t sent = sendClientKeyExchange(ecdheClientPublic);
+
+              Serial.print(F("ClientKeyExchange bytes sent: "));
+              Serial.println(sent);
+
+              if (sent != 75)
+              {
+                  Serial.println(F("ERROR: ClientKeyExchange was not fully sent."));
+              }
+              else
+              {
+                  Serial.println(F("ClientKeyExchange sent!"));
+              }
+          }
+          else if (firstByte == 0x02)
+          {
+              Serial.println();
+              Serial.println(F("ServerHello received."));
+
+              // -------------------------------------------------------
+              // ServerHello handshake length
+              // -------------------------------------------------------
+
+              uint32_t handshakeLength;
+
+              if (!readTLSU24(handshakeLength))
+              {
+                  Serial.println(F("Could not read ServerHello length."));
+                  break;
+              }
+
+              Serial.print(F("Handshake length: "));
+              Serial.println(handshakeLength);
+
+              // -------------------------------------------------------
+              // Server version
+              // -------------------------------------------------------
+
+              uint8_t versionMajor;
+              uint8_t versionMinor;
+
+              if (!readTLSByte(versionMajor) ||
+                  !readTLSByte(versionMinor))
+              {
+                  Serial.println(F("Could not read ServerHello version."));
+                  break;
+              }
+
+              Serial.print(F("Server TLS version: "));
+              Serial.print(versionMajor);
+              Serial.print(F("."));
+              Serial.println(versionMinor);
+
+              // -------------------------------------------------------
+              // Server random
+              // -------------------------------------------------------
+
+              for (uint8_t i = 0; i < 32; i++)
+              {
+                  if (!readTLSByte(serverRandom[i]))
+                  {
+                      Serial.println(F("Could not read server random."));
+                      break;
+                  }
+              }
+
+              Serial.println(F("Server random:"));
+
+              for (uint8_t i = 0; i < 32; i++)
+              {
+                  if (serverRandom[i] < 0x10)
+                      Serial.print('0');
+
+                  Serial.print(serverRandom[i], HEX);
+              }
+
+              Serial.println();
+
+              // -------------------------------------------------------
+              // Session ID
+              // -------------------------------------------------------
+
+              uint8_t sessionIdLength;
+
+              if (!readTLSByte(sessionIdLength))
+              {
+                  Serial.println(F("Could not read session ID length."));
+                  break;
+              }
+
+              Serial.print(F("Session ID length: "));
+              Serial.println(sessionIdLength);
+
+              if (!consumeTLSBytes(sessionIdLength))
+              {
+                  Serial.println(F("Could not consume session ID."));
+                  break;
+              }
+
+              // -------------------------------------------------------
+              // Selected cipher suite
+              // -------------------------------------------------------
+
+              if (!readTLSU16(selectedCipherSuite))
+              {
+                  Serial.println(F("Could not read cipher suite."));
+                  break;
+              }
+
+              Serial.print(F("Selected cipher suite: 0x"));
+
+              if (selectedCipherSuite < 0x1000)
+                  Serial.print('0');
+
+              Serial.println(selectedCipherSuite, HEX);
+
+              // -------------------------------------------------------
+              // Compression method
+              // -------------------------------------------------------
+
+              uint8_t compressionMethod;
+
+              if (!readTLSByte(compressionMethod))
+              {
+                  Serial.println(F("Could not read compression method."));
+                  break;
+              }
+
+              Serial.print(F("Compression method: 0x"));
+              Serial.println(compressionMethod, HEX);
+
+              // -------------------------------------------------------
+              // ServerHello extensions
+              // -------------------------------------------------------
+
+              uint16_t extensionsLength;
+
+              if (!readTLSU16(extensionsLength))
+              {
+                  Serial.println(F("Could not read extensions length."));
+                  break;
+              }
+
+              Serial.print(F("Extensions length: "));
+              Serial.println(extensionsLength);
+
+              if (!consumeTLSBytes(extensionsLength))
+              {
+                  Serial.println(F("Could not consume ServerHello extensions."));
+                  break;
+              }
+
+              Serial.println(F("ServerHello parsed."));
           }
           else if (firstByte == 0x0C)
           {
             Serial.println();
-            Serial.println("ServerKeyExchange received.");
+            Serial.println(F("ServerKeyExchange received."));
 
             // We consumed handshake type, so the streaming parser
             // expects the 3-byte handshake length next.
@@ -1507,16 +2102,16 @@ void setup()
 
             if (!readTLSU24(handshakeLength))
             {
-              Serial.println("Could not read SKE handshake length.");
+              Serial.println(F("Could not read SKE handshake length."));
               break;
             }
 
-            Serial.print("Handshake length: ");
+            Serial.print(F("Handshake length: "));
             Serial.println(handshakeLength);
 
             if (handshakeLength != (uint32_t)(recordLength - 4))
             {
-              Serial.println("SKE length mismatch.");
+              Serial.println(F("SKE length mismatch."));
               break;
             }
 
@@ -1533,15 +2128,15 @@ void setup()
             if (!readTLSU16(namedCurve))
               break;
 
-            Serial.print("Curve type: 0x");
+            Serial.print(F("Curve type: 0x"));
             Serial.println(curveType, HEX);
 
-            Serial.print("Named curve: 0x");
+            Serial.print(F("Named curve: 0x"));
             Serial.println(namedCurve, HEX);
 
             if (curveType != 0x03 || namedCurve != 0x0017)
             {
-              Serial.println("Unsupported EC parameters.");
+              Serial.println(F("Unsupported EC parameters."));
               break;
             }
 
@@ -1552,7 +2147,7 @@ void setup()
 
             if (pointLength != 65)
             {
-              Serial.println("Unexpected EC point length.");
+              Serial.println(F("Unexpected EC point length."));
               break;
             }
 
@@ -1563,7 +2158,7 @@ void setup()
 
             if (pointFormat != 0x04)
             {
-              Serial.println("Expected uncompressed EC point.");
+              Serial.println(F("Expected uncompressed EC point."));
               break;
             }
 
@@ -1574,7 +2169,7 @@ void setup()
 
               if (!readTLSByte(value))
               {
-                Serial.println("Failed to read server EC point X.");
+                Serial.println(F("Failed to read server EC point X."));
                 return;
               }
 
@@ -1588,18 +2183,127 @@ void setup()
 
               if (!readTLSByte(value))
               {
-                Serial.println("Failed to read server EC point Y.");
+                Serial.println(F("Failed to read server EC point Y."));
                 return;
               }
 
               ecc.point1.y.v[31 - i] = value;
             }
 
-            Serial.println("Server public X:");
+            Serial.println(F("Server public X:"));
             print256(ecc.point1.x);
 
-            Serial.println("Server public Y:");
+            Serial.println(F("Server public Y:"));
             print256(ecc.point1.y);
+
+            // =======================================================
+            // ECDHE TEST
+            // =======================================================
+
+            zero256(ecdhePrivate);
+
+            // Temporary test private scalar = 2.
+            ecdhePrivate.v[0] = 2;
+
+            Point generator;
+
+            fromBigEndianProgmem(generator.x, P256_GX_BE);
+            fromBigEndianProgmem(generator.y, P256_GY_BE);
+
+            PointProjective ecdhePoint;
+
+            // -------------------------------------------------------
+            // Client public key = private scalar × G
+            // -------------------------------------------------------
+
+            Serial.println(F("Calculating client public key..."));
+
+            pointScalarMultiplyProjective(
+                ecdhePoint,
+                ecdhePrivate,
+                generator
+            );
+
+            pointProjectiveToAffine(ecdheClientPublic, ecdhePoint);
+
+            Serial.println(F("Client public X:"));
+            print256(ecdheClientPublic.x);
+
+            Serial.println(F("Client public Y:"));
+            print256(ecdheClientPublic.y);
+
+            // -------------------------------------------------------
+            // Shared secret = private scalar × server public key
+            // -------------------------------------------------------
+
+            Serial.println(F("Calculating shared secret..."));
+
+            pointScalarMultiplyProjective(
+                ecdhePoint,
+                ecdhePrivate,
+                ecc.point1
+            );
+
+            pointProjectiveToAffineX(
+                ecdheSharedSecret,
+                ecdhePoint
+            );
+
+            Serial.println(F("Shared secret X:"));
+            print256(ecdheSharedSecret);
+
+            Serial.println(F("ECDHE calculation complete."));
+
+            Serial.println("Deriving TLS master secret and key block...");
+
+            deriveTLSKeys();
+
+            Serial.println("TLS master secret:");
+            for (uint8_t i = 0; i < 48; i++)
+            {
+                if (tlsMasterSecret[i] < 0x10)
+                    Serial.print("0");
+                Serial.print(tlsMasterSecret[i], HEX);
+            }
+            Serial.println();
+
+            Serial.println("Client write key:");
+            for (uint8_t i = 0; i < 16; i++)
+            {
+                if (clientWriteKey[i] < 0x10)
+                    Serial.print("0");
+                Serial.print(clientWriteKey[i], HEX);
+            }
+            Serial.println();
+
+            Serial.println("Server write key:");
+            for (uint8_t i = 0; i < 16; i++)
+            {
+                if (serverWriteKey[i] < 0x10)
+                    Serial.print("0");
+                Serial.print(serverWriteKey[i], HEX);
+            }
+            Serial.println();
+
+            Serial.println("Client write IV:");
+            for (uint8_t i = 0; i < 4; i++)
+            {
+                if (clientWriteIV[i] < 0x10)
+                    Serial.print("0");
+                Serial.print(clientWriteIV[i], HEX);
+            }
+            Serial.println();
+
+            Serial.println("Server write IV:");
+            for (uint8_t i = 0; i < 4; i++)
+            {
+                if (serverWriteIV[i] < 0x10)
+                    Serial.print("0");
+                Serial.print(serverWriteIV[i], HEX);
+            }
+            Serial.println();
+
+            Serial.println("TLS key derivation complete.");
 
             uint8_t hashAlgorithm;
             uint8_t signatureAlgorithm;
@@ -1610,10 +2314,10 @@ void setup()
             if (!readTLSByte(signatureAlgorithm))
               break;
 
-            Serial.print("Signature hash algorithm: 0x");
+            Serial.print(F("Signature hash algorithm: 0x"));
             Serial.println(hashAlgorithm, HEX);
 
-            Serial.print("Signature algorithm: 0x");
+            Serial.print(F("Signature algorithm: 0x"));
             Serial.println(signatureAlgorithm, HEX);
 
             uint16_t signatureLength;
@@ -1621,16 +2325,16 @@ void setup()
             if (!readTLSU16(signatureLength))
               break;
 
-            Serial.print("Signature length: ");
+            Serial.print(F("Signature length: "));
             Serial.println(signatureLength);
 
             if (!consumeTLSBytes(signatureLength))
             {
-              Serial.println("Could not consume RSA signature.");
+              Serial.println(F("Could not consume RSA signature."));
               break;
             }
 
-            Serial.println("RSA signature consumed.");
+            Serial.println(F("RSA signature consumed."));
 
           }
           else
@@ -1643,14 +2347,90 @@ void setup()
 
               if (!readTLSByte(value))
               {
-                Serial.println("Failed to consume handshake record.");
+                Serial.println(F("Failed to consume handshake record."));
                 return;
               }
             }
-            Serial.print("Handshake type: 0x");
+            Serial.print(F("Handshake type: 0x"));
             Serial.println(firstByte, HEX);
           }
         }
+        #if DEBUG_TLS_ALERTS
+        else if (contentType == 0x15)
+        {
+            Serial.println();
+            Serial.println(F("TLS Alert received."));
+
+            if (recordLength != 2)
+            {
+                Serial.print(F("Unexpected Alert length: "));
+                Serial.println(recordLength);
+
+                if (!consumeTLSBytes(recordLength))
+                {
+                    Serial.println(F("Could not consume Alert."));
+                    break;
+                }
+
+                continue;
+            }
+
+            uint8_t alertLevel;
+            uint8_t alertDescription;
+
+            if (!readTLSByte(alertLevel) ||
+                !readTLSByte(alertDescription))
+            {
+                Serial.println(F("Could not read TLS Alert."));
+                break;
+            }
+
+            Serial.print(F("Alert level: 0x"));
+            if (alertLevel < 0x10)
+                Serial.print('0');
+            Serial.println(alertLevel, HEX);
+
+            Serial.print(F("Alert description: 0x"));
+            if (alertDescription < 0x10)
+                Serial.print('0');
+            Serial.println(alertDescription, HEX);
+
+            Serial.print(F("Alert: "));
+
+            switch (alertDescription)
+            {
+                case 0x00: Serial.println(F("close_notify")); break;
+                case 0x0A: Serial.println(F("unexpected_message")); break;
+                case 0x14: Serial.println(F("bad_record_mac")); break;
+                case 0x16: Serial.println(F("record_overflow")); break;
+                case 0x28: Serial.println(F("handshake_failure")); break;
+                case 0x2A: Serial.println(F("bad_certificate")); break;
+                case 0x2B: Serial.println(F("unsupported_certificate")); break;
+                case 0x2C: Serial.println(F("certificate_revoked")); break;
+                case 0x2D: Serial.println(F("certificate_expired")); break;
+                case 0x2E: Serial.println(F("certificate_unknown")); break;
+                case 0x2F: Serial.println(F("illegal_parameter")); break;
+                case 0x30: Serial.println(F("unknown_ca")); break;
+                case 0x31: Serial.println(F("access_denied")); break;
+                case 0x32: Serial.println(F("decode_error")); break;
+                case 0x33: Serial.println(F("decrypt_error")); break;
+                case 0x46: Serial.println(F("protocol_version")); break;
+                case 0x47: Serial.println(F("insufficient_security")); break;
+                case 0x50: Serial.println(F("user_canceled")); break;
+                case 0x5A: Serial.println(F("missing_extension")); break;
+                case 0x6A: Serial.println(F("unsupported_extension")); break;
+                case 0x70: Serial.println(F("unrecognized_name")); break;
+                case 0x74: Serial.println(F("certificate_required")); break;
+                case 0x78: Serial.println(F("no_application_protocol")); break;
+                default:   Serial.println(F("unknown")); break;
+            }
+        }
+        #else
+        else if (contentType == 0x15)
+        {
+            consumeTLSBytes(recordLength);
+        }
+        #endif
         else
         {
           // -------------------------------------------------------
@@ -1663,12 +2443,12 @@ void setup()
 
             if (!readTLSByte(value))
             {
-              Serial.println("Failed to consume TLS record.");
+              Serial.println(F("Failed to consume TLS record."));
               return;
             }
           }
 
-          Serial.println("TLS record consumed without buffering.");
+          Serial.println(F("TLS record consumed without buffering."));
         }
 
 
@@ -1682,9 +2462,7 @@ void setup()
     {
       Serial.println();
 
-      Serial.println(
-        "TCP connection was closed by server."
-      );
+      Serial.println(F("TCP connection was closed by server."));
 
       break;
     }
@@ -1701,13 +2479,13 @@ void setup()
   {
     Serial.println();
 
-    Serial.println("TCP connection still open.");
+    Serial.println(F("TCP connection still open."));
   }
   else
   {
     Serial.println();
 
-    Serial.println("TCP connection closed.");
+    Serial.println(F("TCP connection closed."));
   }
 
 
