@@ -401,7 +401,7 @@ void modAdd256(U256 &result, const U256 &a, const U256 &b)
   if (carry || comparePrime256(result) >= 0)
     subtractPrime256(result);
 }
-void modSub256(  U256 &result,  const U256 &a,  const U256 &b)
+void modSub256(U256 &result, const U256 &a, const U256 &b)
 {
   if (compare256(a, b) >= 0)
   {
@@ -409,12 +409,26 @@ void modSub256(  U256 &result,  const U256 &a,  const U256 &b)
     return;
   }
 
-  U256 temp;
+  // a < b:
+  // result = a - b + p
+  //
+  // sub256 wraps at 2^256, so adding p directly
+  // produces the correct result modulo p.
+  sub256(result, a, b);
 
-  sub256(temp, b, a);
-  subPrime256(result, temp);
+  uint8_t carry = 0;
+
+  for (int i = 0; i < 32; i++)
+  {
+    uint16_t sum =
+        (uint16_t)result.v[i] +
+        primeByte256(i) +
+        carry;
+
+    result.v[i] = (uint8_t)sum;
+    carry = (uint8_t)(sum >> 8);
+  }
 }
-
 void modMul256(U256 &result, const U256 &a, const U256 &b)
 {
     U256 temp;
@@ -1341,10 +1355,6 @@ uint8_t pMinus2Byte256(int i)
 
 void modInverse256(U256 &result, const U256 &a)
 {
-  U256 base;
-
-  copy256(base, a);
-
   zero256(result);
   result.v[0] = 1;
 
@@ -1361,7 +1371,7 @@ void modInverse256(U256 &result, const U256 &a)
       if (exponentByte & (1 << bit))
       {
         // result = result * base mod p
-        modMul256(result, result, base);
+        modMul256(result, result, a);
       }
     }
   }
