@@ -58,7 +58,6 @@ const uint8_t aesSBox[256] PROGMEM =
     0x41, 0x99, 0x2D, 0x0F, 0xB0, 0x54, 0xBB, 0x16
 };
 
-
 uint8_t aesXtime(uint8_t value)
 {
     return (uint8_t)(
@@ -74,14 +73,12 @@ void aesAddRoundKey(    uint8_t block[16],    const uint8_t roundKey[16])
         block[i] ^= roundKey[i];
 }
 
-
 void aesSubBytes(uint8_t block[16])
 {
     for (uint8_t i = 0; i < 16; i++)
         block[i] =
             pgm_read_byte(&aesSBox[block[i]]);
 }
-
 
 void aesShiftRows(uint8_t block[16])
 {
@@ -110,7 +107,6 @@ void aesShiftRows(uint8_t block[16])
     block[7]  = block[3];
     block[3]  = temp;
 }
-
 
 void aesMixColumns(uint8_t block[16])
 {
@@ -440,6 +436,9 @@ void modSub256(  U256 &result,  const U256 &a,  const U256 &b)
 
 void modMul256(U256 &result, const U256 &a, const U256 &b)
 {
+
+  Serial.println(F("M242 INSIDE modMul256"));
+  printMemory();
   U256 x;
   U256 y;
 
@@ -939,54 +938,56 @@ U256 ecdhePrivate;
 void pointDoubleProjective(PointProjective &p);
 void pointDoubleProjective(PointProjective &p)
 {
-  // A = X1²
-  modMul256(ecc.temp1, p.x, p.x);
+    Serial.println(F("M242 INSIDE pointDoubleProjective"));
+    printMemory();
 
-  // B = Y1²
-  modMul256(ecc.temp2, p.y, p.y);
+    // A = X1²
+    modMul256(ecc.temp1, p.x, p.x);
 
-  // C = B²
-  modMul256(ecc.temp3, ecc.temp2, ecc.temp2);
+    // B = Y1²
+    modMul256(ecc.temp2, p.y, p.y);
 
-  // D = 2 * ((X1 + B)² - A - C)
-  modAdd256(ecc.temp2, p.x, ecc.temp2);
-  modMul256(ecc.temp2, ecc.temp2, ecc.temp2);
-  modSub256(ecc.temp2, ecc.temp2, ecc.temp1);
-  modSub256(ecc.temp2, ecc.temp2, ecc.temp3);
-  modAdd256(ecc.temp4, ecc.temp2, ecc.temp2);
+    // C = B²
+    modMul256(ecc.temp3, ecc.temp2, ecc.temp2);
 
-  // E = 3 * (A - Z1⁴)
-  modMul256(ecc.temp2, p.z, p.z);
-  modMul256(ecc.temp2, ecc.temp2, ecc.temp2);
-  modSub256(ecc.temp1, ecc.temp1, ecc.temp2);
+    // D = 2 * ((X1 + B)² - A - C)
+    modAdd256(ecc.temp2, p.x, ecc.temp2);
+    modMul256(ecc.temp2, ecc.temp2, ecc.temp2);
+    modSub256(ecc.temp2, ecc.temp2, ecc.temp1);
+    modSub256(ecc.temp2, ecc.temp2, ecc.temp3);
+    modAdd256(ecc.temp4, ecc.temp2, ecc.temp2);
 
-  set256(ecc.temp2, 3);
-  modMul256(ecc.temp1, ecc.temp1, ecc.temp2);
+    // E = 3 * (A - Z1⁴)
+    modMul256(ecc.temp2, p.z, p.z);
+    modMul256(ecc.temp2, ecc.temp2, ecc.temp2);
+    modSub256(ecc.temp1, ecc.temp1, ecc.temp2);
 
-  // Z3 = 2 * Y1 * Z1
-  // Old Y1 is no longer needed after this.
-  modMul256(ecc.temp2, p.y, p.z);
-  modAdd256(p.z, ecc.temp2, ecc.temp2);
+    set256(ecc.temp2, 3);
+    modMul256(ecc.temp1, ecc.temp1, ecc.temp2);
 
-  // F = E²
-  modMul256(ecc.temp2, ecc.temp1, ecc.temp1);
+    // Z3 = 2 * Y1 * Z1
+    modMul256(ecc.temp2, p.y, p.z);
+    modAdd256(p.z, ecc.temp2, ecc.temp2);
 
-  // 2D — use p.y as scratch.
-  modAdd256(p.y, ecc.temp4, ecc.temp4);
+    // F = E²
+    modMul256(ecc.temp2, ecc.temp1, ecc.temp1);
 
-  // X3 = F - 2D
-  modSub256(p.x, ecc.temp2, p.y);
+    // 2D — use p.y as scratch.
+    modAdd256(p.y, ecc.temp4, ecc.temp4);
 
-  // Y3 = E(D - X3) - 8C
-  modSub256(ecc.temp2, ecc.temp4, p.x);
-  modMul256(ecc.temp2, ecc.temp1, ecc.temp2);
+    // X3 = F - 2D
+    modSub256(p.x, ecc.temp2, p.y);
 
-  // 8C
-  modAdd256(ecc.temp3, ecc.temp3, ecc.temp3);
-  modAdd256(ecc.temp3, ecc.temp3, ecc.temp3);
-  modAdd256(ecc.temp3, ecc.temp3, ecc.temp3);
+    // Y3 = E(D - X3) - 8C
+    modSub256(ecc.temp2, ecc.temp4, p.x);
+    modMul256(ecc.temp2, ecc.temp1, ecc.temp2);
 
-  modSub256(p.y, ecc.temp2, ecc.temp3);
+    // 8C
+    modAdd256(ecc.temp3, ecc.temp3, ecc.temp3);
+    modAdd256(ecc.temp3, ecc.temp3, ecc.temp3);
+    modAdd256(ecc.temp3, ecc.temp3, ecc.temp3);
+
+    modSub256(p.y, ecc.temp2, ecc.temp3);
 }
 
 void printMemory()
@@ -1678,6 +1679,9 @@ void pointSetProjectiveGenerator(PointProjective &p)
 void pointAddAffineProjectiveProgmem(PointProjective &result, const uint8_t *px, const uint8_t *py);
 void pointAddAffineProjectiveProgmem(PointProjective &result, const uint8_t *px, const uint8_t *py)
 {
+
+  Serial.println(F("M242 INSIDE pointAddAffineProjectiveProgmem"));
+  printMemory();
   // Infinity + P = P
   if (isZero256(result.z))
   {
@@ -1849,6 +1853,9 @@ void __attribute__((noinline)) pointScalarMultiplyGeneratorProjective(
 
     bool started = false;
 
+    Serial.println(F("M242 BEFORE scalar multiplication"));
+    printMemory();
+
     for (int8_t byteIndex = 31; byteIndex >= 0; byteIndex--)
     {
         uint8_t value = scalar.v[byteIndex];
@@ -1861,6 +1868,10 @@ void __attribute__((noinline)) pointScalarMultiplyGeneratorProjective(
                     continue;
 
                 pointSetProjectiveGenerator(result);
+
+                Serial.println(F("M242 AFTER pointSetProjectiveGenerator"));
+                printMemory();
+
                 started = true;
                 continue;
             }
@@ -1876,8 +1887,10 @@ void __attribute__((noinline)) pointScalarMultiplyGeneratorProjective(
             }
         }
     }
-}
 
+    Serial.println(F("M242 AFTER scalar multiplication"));
+    printMemory();
+}
 void pointProjectiveToAffineX(U256 &result, const PointProjective &p);
 void pointProjectiveToAffineX(U256 &result, const PointProjective &p)
 {
@@ -1995,47 +2008,68 @@ size_t sendClientKeyExchange(const Point &publicKey)
   return sent;
 }
 
+void testECCMemory()
+{
+    Serial.println(F("=== ECC SRAM TEST ==="));
+
+    zero256(ecdhePrivate);
+
+    // Temporary test private scalar = 2.
+    ecdhePrivate.v[31] = 0xFF;
+
+    PointProjective ecdhePoint;
+
+    Serial.println(F("Calculating client public key..."));
+
+    pointScalarMultiplyGeneratorProjective(
+        ecdhePoint,
+        ecdhePrivate);
+
+    Serial.println(F("M242 BEFORE projective -> affine"));
+    printMemory();
+
+    pointProjectiveToAffine(
+        ecdheClientPublic,
+        ecdhePoint);
+
+    Serial.println(F("Client public X:"));
+    print256(ecdheClientPublic.x);
+
+    Serial.println(F("Client public Y:"));
+    print256(ecdheClientPublic.y);
+}
+
 void setup()
 {
   Serial.begin(115200);
   delay(1000);
-  Serial.println(F("M243")); // setup entered
   Serial.println(F("Starting Ethernet..."));
   if (Ethernet.begin(mac) == 0)
   {
     Serial.println(F("DHCP failed!"));
-
     Serial.print(F("IP address: "));
     Serial.println(Ethernet.localIP());
-
     return;
   }
-  Serial.println(F("M245")); // after Ethernet.begin
-  printMemory();
   delay(1000);
-
   Serial.print(F("IP address: "));
   Serial.println(Ethernet.localIP());
+  Serial.println(F("SKIPPING TCP — ECC SRAM TEST"));
 
+  testECCMemory();
 
+  return;
   // =======================================================
   // TCP CONNECTION
   // ==========================That's enough debugging. We actually need to optimize things. =============================
-  Serial.println(F("M246")); // before TCP connect
   Serial.println(F("Connecting to api.coinpaprika.com:443..."));
-  if (!client.connect(F("api.coinpaprika.com"), 443))
+  if (!client.connect(F("api.binance.com"), 443))
   {
     Serial.println(F("TCP connection failed!"));
     return;
   }
-    Serial.println(F("M248")); // DNS server
   Serial.print(F("DNS: "));
   Serial.println(Ethernet.dnsServerIP());
-
-  Serial.println(F("M247")); // TCP connect returned
-  printMemory();
-  Serial.println(F("TCP connection established!"));
-
 
   // =======================================================
   // CLIENT HELLO
@@ -2617,7 +2651,8 @@ void setup()
                 ecdhePoint,
                 ecdhePrivate
             );
-
+            Serial.println(F("M242 BEFORE projective -> affine"));
+            printMemory();
             pointProjectiveToAffine(ecdheClientPublic, ecdhePoint);
 
             Serial.println(F("Client public X:"));
