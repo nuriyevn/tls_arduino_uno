@@ -1,12 +1,41 @@
 #include <SPI.h>
 #include <Ethernet.h>
 #include <avr/pgmspace.h>
+#include "lcd.h"
+class SilentSerial
+{
+public:
+  template <typename... Args>
+  void begin(Args...)
+  {
+  }
+
+  template <typename... Args>
+  void print(Args...)
+  {
+  }
+
+  template <typename... Args>
+  void println(Args...)
+  {
+  }
+};
+
+SilentSerial silentSerial;
+#define Serial silentSerial
+
+
+
 #define DEBUG_TLS_ALERTS 0
 #define USE_EUCLIDEAN_INVERSE 1
+
 int minFreeMemory = 32767;
 uint32_t modMulCount = 0;
 extern char __heap_start;
 extern char *__brkval;
+
+
+
 struct U256
 {
   uint8_t v[32];
@@ -430,62 +459,6 @@ void modSub256(U256 &result, const U256 &a, const U256 &b)
     result.v[i] = (uint8_t)sum;
     carry = (uint8_t)(sum >> 8);
   }
-}
-void modMul256(U256 &result, const U256 &a, const U256 &b)
-{
-   modMulCount++;
-    U256 temp;
-    const U256 *x;
-    const U256 *y;
-
-    char stackVariable;
-
-    int freeMemory =
-        &stackVariable -
-        (__brkval ? __brkval : &__heap_start);
-
-    if (freeMemory < minFreeMemory)
-        minFreeMemory = freeMemory;
-
-
-    if (&result == &a && &result == &b)
-    {
-        copy256(temp, a);
-        x = &temp;
-        y = &temp;
-    }
-    else if (&result == &a)
-    {
-        copy256(temp, a);
-        x = &temp;
-        y = &b;
-    }
-    else if (&result == &b)
-    {
-        copy256(temp, b);
-        x = &a;
-        y = &temp;
-    }
-    else
-    {
-        x = &a;
-        y = &b;
-    }
-
-    zero256(result);
-
-    for (int i = 31; i >= 0; i--)
-    {
-        uint8_t value = y->v[i];
-
-        for (int bit = 7; bit >= 0; bit--)
-        {
-            modAdd256(result, result, result);
-
-            if (value & (1 << bit))
-                modAdd256(result, result, *x);
-        }
-    }
 }
 
 void set256(  U256 &result,  uint32_t value)
@@ -947,7 +920,7 @@ struct ECCWorkspace
   U256 temp2;
   U256 temp3;
   U256 temp4;
-  //uint8_t product[64]; //optimized out
+  uint8_t product[64]; //optimized out
 };
 
 struct PointProjective
@@ -959,7 +932,135 @@ struct PointProjective
 
 ECCWorkspace ecc;
 Point ecdheClientPublic;
+PointProjective ecdhePoint;
 U256 ecdhePrivate;
+
+void modMul256(U256 &result, const U256 &a, const U256 &b)
+{
+    modMulCount++;
+    uint16_t freeMemory = getFreeMemory();
+    if (freeMemory < minFreeMemory)
+        minFreeMemory = freeMemory;
+
+    // 256 x 256 -> 512 bits
+    for (uint8_t i = 0; i < 64; i++)
+        ecc.product[i] = 0;
+
+    // Schoolbook multiplication
+    for (uint8_t i = 0; i < 32; i++)
+    {
+        uint16_t carry = 0;
+
+        for (uint8_t j = 0; j < 32; j++)
+        {
+            uint16_t t =
+                ecc.product[i + j] +
+                (uint16_t)a.v[i] * b.v[j] +
+                carry;
+
+            ecc.product[i + j] = (uint8_t)t;
+            carry = t >> 8;
+        }
+
+        uint8_t k = i + 32;
+
+        while (carry && k < 64)
+        {
+            uint16_t t = ecc.product[k] + carry;
+            ecc.product[k] = (uint8_t)t;
+            carry = t >> 8;
+            k++;
+        }
+    }
+
+    // P-256:
+    // 2^256 = 2^224 - 2^192 - 2^96 + 1 (mod P)
+    for (int8_t k = 63; k >= 32; k--)
+    {
+        uint8_t c = ecc.product[k];
+        ecc.product[k] = 0;
+
+        uint8_t base = k - 32;
+
+        // + c * 2^(base + 224)
+        uint16_t carry = c;
+        uint8_t pos = base + 28;
+
+        while (carry)
+        {
+            uint16_t t = ecc.product[pos] + carry;
+            ecc.product[pos] = (uint8_t)t;
+            carry = t >> 8;
+            pos++;
+        }
+
+        // + c * 2^base
+        carry = c;
+        pos = base;
+
+        while (carry)
+        {
+            uint16_t t = ecc.product[pos] + carry;
+            ecc.product[pos] = (uint8_t)t;
+            carry = t >> 8;
+            pos++;
+        }
+
+        // - c * 2^(base + 192)
+        uint16_t borrow = c;
+        pos = base + 24;
+
+        while (borrow)
+        {
+            int16_t t = (int16_t)ecc.product[pos] - borrow;
+
+            if (t < 0)
+            {
+                ecc.product[pos] = (uint8_t)(t + 256);
+                borrow = 1;
+            }
+            else
+            {
+                ecc.product[pos] = (uint8_t)t;
+                borrow = 0;
+            }
+
+            pos++;
+        }
+
+        // - c * 2^(base + 96)
+        borrow = c;
+        pos = base + 12;
+
+        while (borrow)
+        {
+            int16_t t = (int16_t)ecc.product[pos] - borrow;
+
+            if (t < 0)
+            {
+                ecc.product[pos] = (uint8_t)(t + 256);
+                borrow = 1;
+            }
+            else
+            {
+                ecc.product[pos] = (uint8_t)t;
+                borrow = 0;
+            }
+
+            pos++;
+        }
+    }
+
+    // Copy reduced 256-bit result.
+    for (uint8_t i = 0; i < 32; i++)
+        result.v[i] = ecc.product[i];
+
+    // Final reduction.
+    if (comparePrime256(result) >= 0)
+        subtractPrime256(result);
+}
+
+
 void pointDoubleProjective(PointProjective &p);
 void pointDoubleProjective(PointProjective &p)
 {
@@ -1016,23 +1117,35 @@ void printMemory()
 {
   char stackVariable;
 
-  int freeMemory =
-      &stackVariable -
-      (__brkval ? __brkval : &__heap_start);
+  uint16_t stackAddress = (uint16_t)&stackVariable;
+  uint16_t heapAddress =
+      (uint16_t)(__brkval ? __brkval : &__heap_start);
 
-  if (freeMemory < minFreeMemory)
-    minFreeMemory = freeMemory;
+  bool valid = stackAddress >= heapAddress;
+
+  uint16_t freeMemory = 0;
+
+  if (valid)
+  {
+      freeMemory = stackAddress - heapAddress;
+
+      if (freeMemory < minFreeMemory)
+          minFreeMemory = freeMemory;
+  }
 
   Serial.print(F("M242 stack=0x"));
   Serial.print((uint16_t)&stackVariable, HEX);
   Serial.print(F(" heap=0x"));
-  Serial.print(
-      (uint16_t)(__brkval ? __brkval : &__heap_start),
-      HEX
-  );
-
-  Serial.print(F(" free="));
-  Serial.print(freeMemory);
+  Serial.print(heapAddress, HEX);
+  if (valid)
+  {
+      Serial.print(F(" free="));
+      Serial.print(freeMemory);
+  }
+  else
+  {
+      Serial.print(F(" INVALID"));
+  }
 
   Serial.print(F(" min="));
   Serial.println(minFreeMemory);
@@ -1979,14 +2092,16 @@ void testECCMemory()
     // Temporary test private scalar = 2.
     ecdhePrivate.v[31] = 0xFF;
 
-    PointProjective ecdhePoint;
+    
 
     Serial.println(F("Calculating client public key..."));
-
+    unsigned long startTime = millis();
     pointScalarMultiplyGeneratorProjective(
         ecdhePoint,
         ecdhePrivate);
-
+    
+    Serial.print("Scalar multiplication ms = ");
+    Serial.println(millis() - startTime);
     Serial.print(F("modMul count after scalar = "));
     Serial.println(modMulCount);
 
@@ -2009,9 +2124,36 @@ void testECCMemory()
     Serial.print(F("MIN FREE SRAM (testECCMemory) = "));
     Serial.println(minFreeMemory);
 }
+uint16_t getFreeMemory()
+{
+    char stackVariable;
 
+    uint16_t stackAddress = (uint16_t)&stackVariable;
+    uint16_t heapAddress =
+        (uint16_t)(__brkval ? __brkval : &__heap_start);
+
+    if (stackAddress < heapAddress)
+        return 0;
+
+    return stackAddress - heapAddress;
+}
+
+void lcdMemory()
+{
+    uint16_t freeNow = getFreeMemory();
+
+    lcdFillScreen(0x0000);
+
+    // Current free SRAM
+    lcdNumber(freeNow, 45, 35, 0xFFFF);
+
+    // Minimum free SRAM
+    lcdNumber(minFreeMemory, 45, 180, 0x07E0);
+}
 void setup()
 {
+
+  lcdInit();
   Serial.begin(115200);
   delay(1000);
   Serial.println(F("Starting Ethernet..."));
@@ -2028,6 +2170,10 @@ void setup()
   Serial.println(F("SKIPPING TCP — ECC SRAM TEST"));
 
   testECCMemory();
+  lcdMemory();
+  //lcdFillScreen(0x0000);
+  //lcdNumber(minFreeMemory, 45, 40, 0xFFFF);
+  delay(5000);
   // =======================================================
   // TCP CONNECTION
   // ==========================That's enough debugging. We actually need to optimize things. =============================
@@ -2598,8 +2744,6 @@ void setup()
             // Temporary test private scalar = 2.
             ecdhePrivate.v[0] = 2;
             
-            PointProjective ecdhePoint;
-
             // -------------------------------------------------------
             // Client public key = private scalar × G
             // -------------------------------------------------------
