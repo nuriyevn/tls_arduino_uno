@@ -1,8 +1,9 @@
-#include <SPI.h>
+
 #include <Ethernet.h>
 #include <avr/pgmspace.h>
 #include "lcd.h"
 #include <Dns.h>
+#include "U256.h"
 DNSClient dnsClient;
 #define DEBUG_TLS_ALERTS 0
 #define USE_EUCLIDEAN_INVERSE 1
@@ -38,10 +39,7 @@ struct GCM128
 };
 EthernetClient client;
 #define TLS_SOCKET 0
-struct U256
-{
-  uint8_t v[32];
-};
+
 struct Point
 {
   U256 x;
@@ -609,7 +607,8 @@ uint8_t tlsMasterSecret[48];
 uint8_t clientWriteKey[16];
 uint8_t clientWriteIV[4];
 uint8_t clientRandom[32];
-
+uint8_t serverWriteKey[16];
+uint8_t serverWriteIV[4];
 uint8_t tlsPrfA[32];
 uint8_t tlsPrfInput[109];
 uint8_t tlsPrfBlock[32];
@@ -788,6 +787,12 @@ Serial.println(getFreeMemory());
     Serial.println(client.available());
     Serial.print(F("CONNECTED BEFORE GCM: "));
     Serial.println(client.connected());
+    if (!client.connected())
+    {
+        showStage(202);
+        return false;
+    }
+
     if (client.write(contentType) != 1) return false;
     if (client.write((uint8_t)0x03) != 1) return false;
     if (client.write((uint8_t)0x03) != 1) return false;
@@ -1329,6 +1334,7 @@ void hmacSha256(    const uint8_t *key,    uint8_t keyLength,    const uint8_t *
     );
 }
 
+
 void tlsPrfSha256(
     const uint8_t *secret,
     uint8_t secretLength,
@@ -1339,16 +1345,21 @@ void tlsPrfSha256(
     uint8_t *output,
     uint16_t outputLength)
 {
+    uint8_t savedSeed[64];
+
+    for (uint8_t i = 0; i < seedLength; i++)
+        savedSeed[i] = seed[i];
+
     uint8_t labelSeedLength = labelLength + seedLength;
 
-    // Build label + seed in tlsPrfInput.
+    // label + seed
     for (uint8_t i = 0; i < labelLength; i++)
         tlsPrfInput[i] = pgm_read_byte(&label[i]);
 
     for (uint8_t i = 0; i < seedLength; i++)
-        tlsPrfInput[labelLength + i] = seed[i];
+        tlsPrfInput[labelLength + i] = savedSeed[i];
 
-    // A(1) = HMAC(secret, label + seed)
+    // A(1)
     hmacSha256(
         secret,
         secretLength,
@@ -1371,8 +1382,9 @@ void tlsPrfSha256(
 
         for (uint8_t i = 0; i < seedLength; i++)
             tlsPrfInput[32 + labelLength + i] =
-                seed[i];
+                savedSeed[i];
 
+        // P_hash block
         hmacSha256(
             secret,
             secretLength,
@@ -1390,7 +1402,7 @@ void tlsPrfSha256(
 
         produced += copyLength;
 
-        // A(i+1) = HMAC(secret, A(i))
+        // A(i+1)
         hmacSha256(
             secret,
             secretLength,
@@ -1403,6 +1415,7 @@ void tlsPrfSha256(
             tlsPrfA[i] = tlsPrfBlock[i];
     }
 }
+
 void deriveTLSKeys()
 {
     uint8_t tlsKeyBlock[40];
@@ -1415,8 +1428,15 @@ void deriveTLSKeys()
 
     const uint8_t masterLabel[] PROGMEM = "master secret";
 
+    uint8_t premasterSecret[32];
+
+    for (uint8_t i = 0; i < 32; i++)
+    {
+        premasterSecret[i] = ecdheSharedSecret.v[31 - i];
+    }
+
     tlsPrfSha256(
-        ecdheSharedSecret.v,
+        premasterSecret,
         32,
         masterLabel,
         13,
@@ -1452,6 +1472,10 @@ void deriveTLSKeys()
 
     for (uint8_t i = 0; i < 4; i++)
         clientWriteIV[i] = tlsKeyBlock[32 + i];
+    for (uint8_t i = 0; i < 16; i++)
+        serverWriteKey[i] = tlsKeyBlock[16 + i];
+    for (uint8_t i = 0; i < 4; i++)
+        serverWriteIV[i] = tlsKeyBlock[36 + i];
 }
 
 
@@ -1867,37 +1891,89 @@ bool consumeTLSBytes(uint16_t count)
   return true;
 }
 
-bool readTLSRecordHeader( uint8_t &contentType, uint8_t &versionMajor, uint8_t &versionMinor, uint16_t &recordLength)
+// bool readTLSRecordHeader( uint8_t &contentType, uint8_t &versionMajor, uint8_t &versionMinor, uint16_t &recordLength)
+// {
+//   unsigned long start = millis();
+
+//   // Wait until the complete 5-byte TLS header is available
+//   while (client.available() < 5)
+//   {
+//     if (!client.connected())
+//       return false;
+
+//     if (millis() - start >= 5000)
+//       return false;
+
+//     delay(10);
+//   }
+
+
+//   contentType = client.read();
+//   versionMajor = client.read();
+//   versionMinor = client.read();
+
+//   uint8_t lengthHigh = client.read();
+//   uint8_t lengthLow = client.read();
+
+//   recordLength =
+//       ((uint16_t)lengthHigh << 8) |
+//       lengthLow;
+
+//   return true;
+// }
+// TEMPORARY
+bool readTLSRecordHeader(
+    uint8_t &contentType,
+    uint8_t &versionMajor,
+    uint8_t &versionMinor,
+    uint16_t &recordLength)
 {
-  unsigned long start = millis();
+    unsigned long start = millis();
 
-  // Wait until the complete 5-byte TLS header is available
-  while (client.available() < 5)
-  {
-    if (!client.connected())
-      return false;
+    while (client.available() < 5)
+    {
+        if (!client.connected())
+            return false;
 
-    if (millis() - start >= 5000)
-      return false;
+        if (millis() - start >= 5000)
+            return false;
 
-    delay(10);
-  }
+        delay(10);
+    }
 
+    uint8_t b0 = client.read();
+    uint8_t b1 = client.read();
+    uint8_t b2 = client.read();
+    uint8_t b3 = client.read();
+    uint8_t b4 = client.read();
 
-  contentType = client.read();
-  versionMajor = client.read();
-  versionMinor = client.read();
+    contentType  = b0;
+    versionMajor = b1;
+    versionMinor = b2;
 
-  uint8_t lengthHigh = client.read();
-  uint8_t lengthLow = client.read();
+    recordLength =
+        ((uint16_t)b3 << 8) | b4;
 
-  recordLength =
-      ((uint16_t)lengthHigh << 8) |
-      lengthLow;
+    showStage(b0);
+    delay(2000);
 
-  return true;
+    showStage(b1);
+    delay(2000);
+
+    showStage(b2);
+    delay(2000);
+
+    showStage(b3);
+    delay(2000);
+
+    showStage(b4);
+    delay(2000);
+
+    showStage(recordLength);
+    delay(3000);
+
+    return true;
 }
-
 uint8_t primeByte256(int i)
 {
   // P256_PRIME_BE is big-endian,
@@ -2631,78 +2707,6 @@ uint16_t getFreeMemory()
 //     lcdNumber(minFreeMemory, 45, 180, 0x07E0);
 // }
 
-static bool testGCM()
-{
-    // NIST GCM test vector
-    // Key = 16 zero bytes
-    // IV  = 12 zero bytes
-    // Plaintext = 16 zero bytes
-    // AAD = none
-    //
-    // Expected ciphertext:
-    // 0388dace60b6a392f328c2b971b2fe78
-    //
-    // Expected tag:
-    // ab6e47d42cec13bdf53a67b21257bddf
-
-    uint8_t key[16] = {0};
-    uint8_t J0[16] = {0};
-
-    // 96-bit IV || 0x00000001
-    J0[15] = 1;
-
-    uint8_t data[16] = {0};
-
-    // Counter starts at inc32(J0)
-    uint8_t counter[16];
-
-    for (uint8_t i = 0; i < 16; i++)
-        counter[i] = J0[i];
-
-    gcmIncrementCounter(counter);
-
-    // Encrypt plaintext
-    gcmCtrCrypt(key, counter, data, 16);
-
-    uint8_t tag[16];
-
-    gcmMakeTag(
-        key,
-        J0,
-        NULL,
-        0,
-        data,
-        16,
-        tag
-    );
-
-    const uint8_t expectedCiphertext[16] =
-    {
-        0x03, 0x88, 0xda, 0xce,
-        0x60, 0xb6, 0xa3, 0x92,
-        0xf3, 0x28, 0xc2, 0xb9,
-        0x71, 0xb2, 0xfe, 0x78
-    };
-
-    const uint8_t expectedTag[16] =
-    {
-        0xab, 0x6e, 0x47, 0xd4,
-        0x2c, 0xec, 0x13, 0xbd,
-        0xf5, 0x3a, 0x67, 0xb2,
-        0x12, 0x57, 0xbd, 0xdf
-    };
-
-    for (uint8_t i = 0; i < 16; i++)
-    {
-        if (data[i] != expectedCiphertext[i])
-            return false;
-
-        if (tag[i] != expectedTag[i])
-            return false;
-    }
-
-    return true;
-}
 
 // static void lcdGCMStatus(bool ok)
 // {
@@ -2869,6 +2873,185 @@ static bool resolveApiBinance(uint8_t ip[4])
     udp.stop();
     return false;
 }
+// ----------------------------------------------------------------
+// Wait for and process Server ChangeCipherSpec and Finished
+// ----------------------------------------------------------------
+uint8_t tlsReadServerHandshake()
+{
+    // --- WAIT FOR SERVER CCS ---
+    uint8_t contentType, versionMajor, versionMinor;
+    uint16_t recordLength;
+    if (!readTLSRecordHeader(contentType, versionMajor, versionMinor, recordLength)) {
+        showStage(81); // Header read failed
+        return 81;
+    }
+
+    if (contentType == 0x14 && recordLength == 1) {
+        // This is the expected ChangeCipherSpec record
+        // TLS CCS, but wrong record length
+        showStage(145);
+        delay(7000);
+    } 
+    // Expect ChangeCipherSpec record (type 0x14, length 1)
+    if (contentType != 0x14 || recordLength != 1)
+    {
+        // Wrong content type or length for CCS
+
+        if (contentType == 0x15)
+        {
+            // TLS ALERT
+            uint8_t alertLevel;
+            uint8_t alertDescription;
+
+            readTLSByte(alertLevel);
+            readTLSByte(alertDescription);
+
+            // Show alert description
+            showStage(alertDescription);
+            delay(7000);
+
+            // Show the record length
+            showStage(recordLength);
+            delay(7000);
+        }
+        else if (contentType == 0x16)
+        {
+            // TLS HANDSHAKE
+            showStage(160);
+            delay(7000);
+
+            // Show record length
+            showStage(recordLength);
+            delay(7000);
+        }
+        else if (contentType == 0x14)
+        {
+            // TLS CCS, but wrong record length
+            showStage(140);
+            delay(7000);
+
+            // Show record length
+            showStage(recordLength);
+            delay(7000);
+        }
+        else
+        {
+            // Unknown content type
+            showStage(contentType);
+            delay(7000);
+
+            // Show record length
+            showStage(recordLength);
+            delay(7000);
+        }
+
+        return 82;
+    }
+    uint8_t ccs;
+    if (!readTLSByte(ccs)) {
+        showStage(83);
+        return 83;
+    }
+    if (ccs != 0x01) {
+        showStage(84); // Payload must be 0x01 for CCS
+        return 84;
+    }
+    showStage(85); // Server CCS received and processed
+
+    // --- READ SERVER FINISHED (Encrypted) ---
+    if (!readTLSRecordHeader(contentType, versionMajor, versionMinor, recordLength)) {
+        showStage(86);
+        return 86;
+    }
+    if (contentType != 0x16) { 
+        showStage(87); // Expected handshake record
+        return 87;
+    }
+    // TLS1.2 AES-GCM Finished record: 8B explicit nonce + 16B ciphertext + 16B tag = 40 bytes
+    if (recordLength != 40) {
+        showStage(88); // Unexpected record length
+        return 88;
+    }
+    // Read 8-byte explicit nonce
+    uint8_t explicitNonce[8];
+    for (uint8_t i = 0; i < 8; i++) {
+        if (!readTLSByte(explicitNonce[i])) { showStage(89); return 89; }
+    }
+    // Read 16-byte ciphertext (Finished payload)
+    uint8_t ciphertext[16];
+    for (uint8_t i = 0; i < 16; i++) {
+        if (!readTLSByte(ciphertext[i])) { showStage(91); return 91; }
+    }
+    // Read 16-byte auth tag
+    uint8_t receivedTag[16];
+    for (uint8_t i = 0; i < 16; i++) {
+        if (!readTLSByte(receivedTag[i])) { showStage(92); return 92; }
+    }
+
+    // --- VERIFY GCM TAG (Server Finished) ---
+    // Build 12-byte nonce = serverWriteIV (4 bytes) || explicitNonce (8 bytes)
+    uint8_t nonce[12];
+    for (uint8_t i = 0; i < 4; i++) { nonce[i] = serverWriteIV[i]; }
+    for (uint8_t i = 0; i < 8; i++) { nonce[4 + i] = explicitNonce[i]; }
+    // Construct AAD = seq_num (8 bytes) || type (0x16) || version (0x03 0x03) || length (0x0010)
+    // Here seq = 0 for Server Finished (first encrypted record)
+    uint8_t aad[13] = {0};
+    aad[8]  = 0x16;
+    aad[9]  = 0x03;
+    aad[10] = 0x03;
+    aad[11] = 0x00;
+    aad[12] = 0x10;
+    uint8_t calcTag[16];
+    gcmMakeTag(serverWriteKey, nonce, aad, 13, ciphertext, 16, calcTag);
+    for (uint8_t i = 0; i < 16; i++) {
+        if (calcTag[i] != receivedTag[i]) {
+            showStage(93); // GCM authentication failed
+            return 93;
+        }
+    }
+    showStage(94); // GCM tag verified
+
+    // --- DECRYPT SERVER FINISHED ---
+    // CTR decrypt: set counter = nonce || 0x00000001 (i.e. initial counter J0 incremented)
+    uint8_t counter[16];
+    for (uint8_t i = 0; i < 12; i++) { counter[i] = nonce[i]; }
+    counter[12] = 0x00;
+    counter[13] = 0x00;
+    counter[14] = 0x00;
+    counter[15] = 0x01;
+    gcmIncrementCounter(counter);  // now counter = J0 + 1
+    gcmCtrCrypt(serverWriteKey, counter, ciphertext, 16); // decrypt in place
+
+    // --- VERIFY FINISHED HANDSHAKE CONTENTS ---
+    // First 4 bytes should be Handshake Header: (0x14, 0x00 0x00 0x0C) for Finished of length 12
+    if (ciphertext[0] != 0x14 || ciphertext[1] != 0x00 ||
+        ciphertext[2] != 0x00 || ciphertext[3] != 0x0C) 
+    {
+        showStage(95); // Malformed Finished header
+        return 95;
+    }
+    // Compute expected verify_data = PRF(master_secret, "server finished", Hash(transcript))
+    uint8_t serverHash[32];
+    tlsTranscriptFinal(serverHash);
+    const uint8_t label[] PROGMEM = "server finished";
+    tlsPrfSha256(tlsMasterSecret, 48, label, 15, serverHash, 32, tlsPrfBlock, 12);
+    // Compare against decrypted verify_data (bytes 4..15)
+    for (uint8_t i = 0; i < 12; i++) {
+        if (ciphertext[4 + i] != tlsPrfBlock[i]) {
+            showStage(96); // Finished verify_data mismatch
+            return 96;
+        }
+    }
+
+    // --- ACCEPT SERVER FINISHED ---
+    // Update transcript with plaintext Finished (handshake header + verify_data)
+    for (uint8_t i = 0; i < 16; i++) {
+        tlsTranscriptUpdateByte(ciphertext[i]);
+    }
+    tlsReadSequence++;  // increment server record sequence
+    showStage(97);      // Server Finished verified
+    return 90;          // Handshake complete
+}
 
 uint8_t runTLS()
 {
@@ -2905,7 +3088,7 @@ uint8_t runTLS()
 
     dnsClient.begin(dnsIP);
 
-    if (dnsClient.getHostByName("api.binance.com", apiIP) != 1)
+    if (dnsClient.getHostByName("api.coinpaprika.com", apiIP) != 1)
     {
         Serial.println(F("FAIL 11: DNS RESOLUTION"));
         return 11;
@@ -3395,7 +3578,10 @@ uint8_t runTLS()
                     tlsPrfBlock[1] = 0x00;
                     tlsPrfBlock[2] = 0x00;
                     tlsPrfBlock[3] = 0x0C;
-
+                    for (uint8_t i = 0; i < 16; i++)
+                    {
+                        tlsTranscriptUpdateByte(tlsPrfBlock[i]);
+                    }
                     Serial.print(F("CONNECTED AFTER FINISHED COMPUTE: "));
                     Serial.println(client.connected());
                     // ------------------------------------------------
@@ -3427,37 +3613,17 @@ uint8_t runTLS()
 
                     showStage(80);
 
-                    // ------------------------------------------------
-                    // ADD FINISHED TO TRANSCRIPT
-                    // ------------------------------------------------
+                    // NOW WAIT FOR SERVER CCS + SERVER FINISHED
+                    uint8_t serverStage = tlsReadServerHandshake();
 
-                    for (uint8_t i = 0; i < 16; i++)
+                    if (serverStage != 90)
                     {
-                        tlsTranscriptUpdateByte(
-                            tlsPrfBlock[i]
-                        );
-                    }
-
-                    // =================================================
-                    // SUCCESS
-                    // =================================================
-
-                    Serial.println(F("TLS SUCCESS: HANDSHAKE COMPLETE"));
-
-                    Serial.println(F("SENDING HTTPS GET"));
-
-                    if (!tlsSendHttpGet())
-                    {
-                        Serial.println(F("HTTPS GET SEND FAILED"));
-                        return 54;
+                        return serverStage;
                     }
 
                     showStage(90);
-
-                    Serial.println(F("HTTPS GET SENT"));
-        showStage(90);
-        return 90;
-                    Serial.println(F("WAITING FOR HTTPS RESPONSE"));
+                    return 90;
+                   
                 }
 
                 // =================================================
@@ -3635,7 +3801,7 @@ static bool tlsSendHttpGet()
 {
     const char request[] =
         "GET /api/v3/time HTTP/1.1\r\n"
-        "Host: api.binance.com\r\n"
+        "Host: api.coinpaprika.com\r\n"
         "Connection: close\r\n"
         "\r\n";
 
