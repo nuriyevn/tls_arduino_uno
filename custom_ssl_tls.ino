@@ -30,6 +30,7 @@ public:
 SilentSerial silentSerial;*/
 
 //#define Serial silentSerial
+
 //int minFreeMemory = 32767;
 //uint32_t modMulCount = 0;
 extern char __heap_start;
@@ -240,10 +241,7 @@ void aes128EncryptBlock(    const uint8_t key[16],    uint8_t block[16])
 uint8_t gcmV[16];
 
 // X = X * H in GF(2^128)
-static void gcmMultiply(
-    uint8_t result[16],
-    const uint8_t X[16],
-    const uint8_t H[16])
+static void gcmMultiply(    uint8_t result[16],    const uint8_t X[16],    const uint8_t H[16])
 {
     for (uint8_t i = 0; i < 16; i++)
     {
@@ -277,18 +275,14 @@ static void gcmMultiply(
             gcmV[0] ^= 0xE1;
     }
 }
-static void gcmXorBlock(
-    uint8_t dst[16],
-    const uint8_t src[16])
+
+static void gcmXorBlock(    uint8_t dst[16],    const uint8_t src[16])
 {
     for (uint8_t i = 0; i < 16; i++)
         dst[i] ^= src[i];
 }
 
-
-static void gcmInit(
-    GCM128 &ctx,
-    const uint8_t key[16])
+static void gcmInit(    GCM128 &ctx,    const uint8_t key[16])
 {
     uint8_t zero[16] = {0};
 
@@ -303,9 +297,7 @@ static void gcmInit(
 }
 
 
-static void gcmHashBlock(
-    GCM128 &ctx,
-    const uint8_t block[16])
+static void gcmHashBlock(    GCM128 &ctx,    const uint8_t block[16])
 {
     gcmXorBlock(ctx.Y, block);
 
@@ -332,10 +324,7 @@ static void gcmIncrementCounter(uint8_t counter[16])
     }
 }
 
-static void tlsGcmMakeNonce(
-    uint8_t nonce[12],
-    const uint8_t fixedIV[4],
-    uint64_t sequenceNumber)
+static void tlsGcmMakeNonce(    uint8_t nonce[12],    const uint8_t fixedIV[4],    uint64_t sequenceNumber)
 {
     // TLS 1.2 AES-GCM nonce:
     // fixed IV (4 bytes) || sequence number (8 bytes)
@@ -355,9 +344,7 @@ static void tlsGcmMakeNonce(
     nonce[11] = (uint8_t)(sequenceNumber);
 }
 
-static void tlsGcmMakeJ0(
-    uint8_t J0[16],
-    const uint8_t nonce[12])
+static void tlsGcmMakeJ0(    uint8_t J0[16],    const uint8_t nonce[12])
 {
     for (uint8_t i = 0; i < 12; i++)
         J0[i] = nonce[i];
@@ -368,13 +355,8 @@ static void tlsGcmMakeJ0(
     J0[15] = 1;
 }
 
-static void tlsGcmMakeAAD(
-    uint8_t aad[13],
-    uint64_t sequenceNumber,
-    uint8_t contentType,
-    uint8_t versionMajor,
-    uint8_t versionMinor,
-    uint16_t plaintextLength)
+static void tlsGcmMakeAAD(    uint8_t aad[13],    uint64_t sequenceNumber,    uint8_t contentType,
+    uint8_t versionMajor,    uint8_t versionMinor,    uint16_t plaintextLength)
 {
     // 8-byte TLS record sequence number
     aad[0] = (uint8_t)(sequenceNumber >> 56);
@@ -409,11 +391,7 @@ static bool tlsSendChangeCipherSpec()
     return true;
 }
 
-static void gcmCtrCrypt(
-    const uint8_t key[16],
-    uint8_t counter[16],
-    uint8_t *data,
-    uint16_t length)
+static void gcmCtrCrypt(const uint8_t key[16], uint8_t counter[16],uint8_t *data,  uint16_t length)
 {
     uint8_t stream[16];
 
@@ -452,14 +430,8 @@ static void gcmCtrCrypt(
     }
 }
 
-static void gcmMakeTag(
-    const uint8_t key[16],
-    const uint8_t J0[16],
-    const uint8_t *aad,
-    uint16_t aadLen,
-    const uint8_t *ciphertext,
-    uint16_t ciphertextLen,
-    uint8_t tag[16])
+static void gcmMakeTag(    const uint8_t key[16],    const uint8_t J0[16],    const uint8_t *aad,    uint16_t aadLen,
+    const uint8_t *ciphertext,    uint16_t ciphertextLen,    uint8_t tag[16])
 {
 
     // Serial.print(F("FREE SRAM ENTER gcmMakeTag: "));
@@ -555,9 +527,8 @@ const uint8_t aesTestPlaintext[16] PROGMEM =
     0x88, 0x99, 0xAA, 0xBB,
     0xCC, 0xDD, 0xEE, 0xFF
 };
-const uint8_t shaTestData[] PROGMEM = "abc";
 
-U256 ecdheSharedSecret;
+
 uint8_t serverRandom[32];
 uint8_t tlsMasterSecret[48];
 uint8_t clientWriteKey[16];
@@ -1360,6 +1331,30 @@ void printHex(
     Serial.println();
 }
 
+struct ECCWorkspace
+{
+  Point point1;
+  // Point point2; //optimized out
+
+  U256 temp1;
+  U256 temp2;
+  U256 temp3;
+  U256 temp4;
+  uint8_t product[64]; // this is used also for  savedSeed  inside of tlsPrfSha256
+};
+
+struct PointProjective
+{
+  U256 x;
+  U256 y;
+  U256 z;
+};
+
+ECCWorkspace ecc;
+
+#define ecdheSharedSecret ecc.temp1
+
+
 void deriveTLSKeys()
 {
     // ============================================================
@@ -1367,7 +1362,6 @@ void deriveTLSKeys()
     // Internal U256 is little-endian.
     // Print in big-endian / TLS byte order.
     // ============================================================
-
     printHex(
         F("ECDHE_RAW="),
         ecdheSharedSecret.v,
@@ -1411,6 +1405,8 @@ void deriveTLSKeys()
     // Convert ECDHE shared secret from internal little-endian
     // representation to TLS big-endian representation.
     // ============================================================
+    // NOTE: ecdheSharedSecret aliases ecc.temp1,
+    // so this reversal converts temp1 from little-endian to TLS big-endian form.
 
     for (uint8_t i = 0; i < 16; i++)
     {
@@ -1564,26 +1560,8 @@ void deriveTLSKeys()
         4
     );
 }
-struct ECCWorkspace
-{
-  Point point1;
-  // Point point2; //optimized out
 
-  U256 temp1;
-  U256 temp2;
-  U256 temp3;
-  U256 temp4;
-  uint8_t product[64]; // this is used also for  savedSeed  inside of tlsPrfSha256
-};
 
-struct PointProjective
-{
-  U256 x;
-  U256 y;
-  U256 z;
-};
-
-ECCWorkspace ecc;
 Point ecdheClientPublic;
 PointProjective ecdhePoint;
 U256 ecdhePrivate;
@@ -2016,7 +1994,11 @@ void tlsPrfSha256(
         labelSeedLength,
         tlsPrfA
     );
-
+    printHex(
+        F("PRF_A1="),
+        tlsPrfA,
+        32
+    );  
     uint16_t produced = 0;
 
     while (produced < outputLength)
@@ -3515,7 +3497,7 @@ uint8_t runTLS()
                     );
                     //Serial.println("M");
                     pointProjectiveToAffineX(
-                        ecdheSharedSecret,
+                        ecc.temp1,
                         ecdhePoint
                     );
                     //Serial.println("A");
@@ -3913,6 +3895,14 @@ void showStage(uint8_t stage)
 
 void printIP(const IPAddress &ip)
 {
+    Serial.print(F("IP="));
+    Serial.print(ip[0]);
+    Serial.print(F("."));
+    Serial.print(ip[1]);
+    Serial.print(F("."));
+    Serial.print(ip[2]);
+    Serial.print(F("."));
+    Serial.println(ip[3]);
 }
 bool testTCP(const char *hostname, uint16_t port)
 {
@@ -3960,14 +3950,19 @@ static bool tlsSendHttpGet()
     );
 }
 
+void initSerial()
+{
+    Serial.begin(115200);
+    delay(1000);
+    Serial.println(F("Serial initialized"));
+}
 void setup()
 {   
     #ifdef TURN_LCD_ON
     lcdInit();
     #endif
-    Serial.begin(115200);
+    initSerial();
     delay(1000);
-
     if (Ethernet.begin(mac) == 0)
     {
         //Serial.println(F("Failed to configure Ethernet using DHCP"));
@@ -3983,6 +3978,7 @@ void setup()
     {
         //Serial.print(F("IP+"));
         //Serial.println(Ethernet.localIP());
+        printIP(Ethernet.localIP());
     }
 
     delay(1000);
