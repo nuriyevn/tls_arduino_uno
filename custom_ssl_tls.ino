@@ -537,7 +537,30 @@ uint8_t clientRandom[32];
 uint8_t serverWriteKey[16];
 uint8_t serverWriteIV[4];
 
-uint8_t tlsPrfA[32];
+struct ECCWorkspace
+{
+  Point point1;
+  // Point point2; //optimized out
+
+  U256 temp1;
+  U256 temp2;
+  U256 temp3;
+  U256 temp4;
+  uint8_t product[64]; // this is used also for  savedSeed  inside of tlsPrfSha256
+};
+
+struct PointProjective
+{
+  U256 x;
+  U256 y;
+  U256 z;
+};
+
+ECCWorkspace ecc;
+
+#define ecdheSharedSecret ecc.temp1
+#define tlsPrfA ecc.temp2.v
+
 uint8_t tlsPrfInput[109];
 uint8_t tlsHmacKeyBlock[64];
 uint8_t tlsHmacInnerHash[32];
@@ -1331,28 +1354,6 @@ void printHex(
     Serial.println();
 }
 
-struct ECCWorkspace
-{
-  Point point1;
-  // Point point2; //optimized out
-
-  U256 temp1;
-  U256 temp2;
-  U256 temp3;
-  U256 temp4;
-  uint8_t product[64]; // this is used also for  savedSeed  inside of tlsPrfSha256
-};
-
-struct PointProjective
-{
-  U256 x;
-  U256 y;
-  U256 z;
-};
-
-ECCWorkspace ecc;
-
-#define ecdheSharedSecret ecc.temp1
 
 
 void deriveTLSKeys()
@@ -1974,6 +1975,9 @@ void tlsPrfSha256(
     uint16_t outputLength)
 {   
 
+    printHex(F("PRF_SECRET="), secret, secretLength);
+    printHex(F("PRF_LABEL="), label, labelLength);
+    printHex(F("PRF_SEED="), seed, seedLength);
     for (uint8_t i = 0; i < seedLength; i++)
         ecc.product[i] = seed[i];
 
@@ -1981,7 +1985,7 @@ void tlsPrfSha256(
 
     // label + seed
     for (uint8_t i = 0; i < labelLength; i++)
-        tlsPrfInput[i] = pgm_read_byte(&label[i]);
+        tlsPrfInput[i] = label[i];
 
     for (uint8_t i = 0; i < seedLength; i++)
         tlsPrfInput[labelLength + i] = ecc.product[i];
@@ -2008,9 +2012,7 @@ void tlsPrfSha256(
             tlsPrfInput[i] = tlsPrfA[i];
 
         for (uint8_t i = 0; i < labelLength; i++)
-            tlsPrfInput[32 + i] =
-                pgm_read_byte(&label[i]);
-
+            tlsPrfInput[32 + i] = label[i];
         for (uint8_t i = 0; i < seedLength; i++)
             tlsPrfInput[32 + labelLength + i] =
                 ecc.product[i];
