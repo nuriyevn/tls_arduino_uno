@@ -1,13 +1,16 @@
 
 #include <Ethernet.h>
 #include <avr/pgmspace.h>
-#include "lcd.h"
 #include <Dns.h>
 #include "U256.h"
-DNSClient dnsClient;
+
+// #define TURN_LCD_ON
+#ifdef TURN_LCD_ON
+//#include "lcd.h"
+#endif
 #define DEBUG_TLS_ALERTS 0
 #define USE_EUCLIDEAN_INVERSE 1
-class SilentSerial
+/*class SilentSerial
 {
 public:
     void begin(unsigned long) {}
@@ -24,9 +27,9 @@ public:
     void println() {}
 };
 
-SilentSerial silentSerial;
+SilentSerial silentSerial;*/
 
-#define Serial silentSerial
+//#define Serial silentSerial
 //int minFreeMemory = 32767;
 //uint32_t modMulCount = 0;
 extern char __heap_start;
@@ -45,8 +48,9 @@ struct Point
   U256 x;
   U256 y;
 };
-byte mac[] = {
-  0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED
+const byte mac[] PROGMEM = {
+  //0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED
+  0x02, 0x12, 0x34, 0x56, 0x78, 0x9A
 };
 
 struct SHA256Context
@@ -200,8 +204,8 @@ void aesExpandRoundKey(    uint8_t roundKey[16],    uint8_t round)
 
 void aes128EncryptBlock(    const uint8_t key[16],    uint8_t block[16])
 {
-    Serial.print(F("FREE SRAM BEFORE AES: "));
-    Serial.println(getFreeMemory());
+    // Serial.print(F("FREE SRAM BEFORE AES: "));
+    // Serial.println(getFreeMemory());
 
     for (uint8_t i = 0; i < 16; i++)
         aesRoundKey[i] = key[i];
@@ -438,10 +442,11 @@ static void gcmMakeTag(
     uint8_t tag[16])
 {
 
-    Serial.print(F("FREE SRAM ENTER gcmMakeTag: "));
-    Serial.println(getFreeMemory());
+    // Serial.print(F("FREE SRAM ENTER gcmMakeTag: "));
+    // Serial.println(getFreeMemory());
     GCM128 ctx;
     gcmInit(ctx, key);
+    uint8_t work[16];
 
     uint16_t originalAadLen = aadLen;
     uint16_t originalCiphertextLen = ciphertextLen;
@@ -456,12 +461,13 @@ static void gcmMakeTag(
 
     if (aadLen)
     {
-        uint8_t block[16] = {0};
+        for (uint8_t i = 0; i < 16; i++)
+            work[i] = 0;
 
         for (uint8_t i = 0; i < aadLen; i++)
-            block[i] = aad[i];
+            work[i] = aad[i];
 
-        gcmHashBlock(ctx, block);
+        gcmHashBlock(ctx, work);
     }
 
     // Ciphertext
@@ -474,45 +480,44 @@ static void gcmMakeTag(
 
     if (ciphertextLen)
     {
-        uint8_t block[16] = {0};
+        for (uint8_t i = 0; i < 16; i++)
+            work[i] = 0;
 
         for (uint8_t i = 0; i < ciphertextLen; i++)
-            block[i] = ciphertext[i];
+            work[i] = ciphertext[i];
 
-        gcmHashBlock(ctx, block);
+        gcmHashBlock(ctx, work);
     }
 
     // Length block
-    uint8_t lengths[16] = {0};
-
+    for (uint8_t i = 0; i < 16; i++)
+        work[i] = 0;
     uint32_t aadBits =
         (uint32_t)originalAadLen * 8UL;
 
     uint32_t ciphertextBits =
         (uint32_t)originalCiphertextLen * 8UL;
 
-    lengths[4] = aadBits >> 24;
-    lengths[5] = aadBits >> 16;
-    lengths[6] = aadBits >> 8;
-    lengths[7] = aadBits;
+    work[4] = aadBits >> 24;
+    work[5] = aadBits >> 16;
+    work[6] = aadBits >> 8;
+    work[7] = aadBits;
 
-    lengths[12] = ciphertextBits >> 24;
-    lengths[13] = ciphertextBits >> 16;
-    lengths[14] = ciphertextBits >> 8;
-    lengths[15] = ciphertextBits;
+    work[12] = ciphertextBits >> 24;
+    work[13] = ciphertextBits >> 16;
+    work[14] = ciphertextBits >> 8;
+    work[15] = ciphertextBits;
 
-    gcmHashBlock(ctx, lengths);
+    gcmHashBlock(ctx, work);
 
     // Tag = AES(K, J0) XOR GHASH
-    uint8_t tagBlock[16];
+    for (uint8_t i = 0; i < 16; i++)
+        work[i] = J0[i];
+
+    aes128EncryptBlock(key, work);
 
     for (uint8_t i = 0; i < 16; i++)
-        tagBlock[i] = J0[i];
-
-    aes128EncryptBlock(key, tagBlock);
-
-    for (uint8_t i = 0; i < 16; i++)
-        tag[i] = tagBlock[i] ^ ctx.Y[i];
+        tag[i] = work[i] ^ ctx.Y[i];
 }
 
 static void tlsGcmEncryptRecord(
@@ -611,7 +616,7 @@ uint8_t serverWriteKey[16];
 uint8_t serverWriteIV[4];
 uint8_t tlsPrfA[32];
 uint8_t tlsPrfInput[109];
-uint8_t tlsPrfBlock[32];
+
 
 
 uint8_t tlsHmacKeyBlock[64];
@@ -619,7 +624,6 @@ uint8_t tlsHmacInnerHash[32];
 SHA256Context tlsHmacContext;
 
 
-uint8_t tlsTranscriptHash[32];
 bool tlsTranscriptRecord = false;
 uint64_t tlsWriteSequence = 0;
 uint64_t tlsReadSequence = 0;
@@ -679,27 +683,35 @@ void tlsTranscriptFinal(uint8_t digest[32])
 
 static bool tlsSendGCMRecord(    uint8_t contentType,    uint8_t *plaintext,    uint16_t plaintextLength)
 {
-    Serial.print(F("CONNECTED GCM START: "));
-    Serial.println(client.connected());
-    Serial.print(F("FREE SRAM GCM START: "));
-    Serial.println(getFreeMemory());   
-    uint8_t nonce[12];
+    // Serial.print(F("CONNECTED GCM START: "));
+    // Serial.println(client.connected());
+    // Serial.print(F("FREE SRAM GCM START: "));
+    // Serial.println(getFreeMemory());   
     uint8_t J0[16];
     uint8_t counter[16];
     uint8_t aad[13];
-    uint8_t tag[16];
 
     // --------------------------------------------------
     // Nonce = client_write_IV || sequence_number
     // --------------------------------------------------
+    J0[0] = clientWriteIV[0];
+    J0[1] = clientWriteIV[1];
+    J0[2] = clientWriteIV[2];
+    J0[3] = clientWriteIV[3];
 
-    tlsGcmMakeNonce(
-        nonce,
-        clientWriteIV,
-        tlsWriteSequence
-    );
+    J0[4]  = (uint8_t)(tlsWriteSequence >> 56);
+    J0[5]  = (uint8_t)(tlsWriteSequence >> 48);
+    J0[6]  = (uint8_t)(tlsWriteSequence >> 40);
+    J0[7]  = (uint8_t)(tlsWriteSequence >> 32);
+    J0[8]  = (uint8_t)(tlsWriteSequence >> 24);
+    J0[9]  = (uint8_t)(tlsWriteSequence >> 16);
+    J0[10] = (uint8_t)(tlsWriteSequence >> 8);
+    J0[11] = (uint8_t)tlsWriteSequence;
 
-    tlsGcmMakeJ0(J0, nonce);
+    J0[12] = 0;
+    J0[13] = 0;
+    J0[14] = 0;
+    J0[15] = 1;
 
     // --------------------------------------------------
     // TLS AAD:
@@ -738,21 +750,21 @@ static bool tlsSendGCMRecord(    uint8_t contentType,    uint8_t *plaintext,    
     // --------------------------------------------------
     // Encrypt plaintext IN PLACE
     // --------------------------------------------------
-    Serial.print(F("SRAM BEFORE CTR: "));
-Serial.println(getFreeMemory());
+    // Serial.print(F("SRAM BEFORE CTR: "));
+    // Serial.println(getFreeMemory());
     gcmCtrCrypt(
         clientWriteKey,
         counter,
         plaintext,
         plaintextLength
     );
-Serial.print(F("SRAM AFTER CTR: "));
-Serial.println(getFreeMemory());
+    // Serial.print(F("SRAM AFTER CTR: "));
+    // Serial.println(getFreeMemory());
     // --------------------------------------------------
     // Authentication tag
     // --------------------------------------------------
-Serial.print(F("SRAM BEFORE TAG: "));
-Serial.println(getFreeMemory());
+    // Serial.print(F("SRAM BEFORE TAG: "));
+    // Serial.println(getFreeMemory());
     gcmMakeTag(
         clientWriteKey,
         J0,
@@ -760,12 +772,12 @@ Serial.println(getFreeMemory());
         13,
         plaintext,
         plaintextLength,
-        tag
+        counter
     );
-    Serial.print(F("SRAM AFTER TAG: "));
-Serial.println(getFreeMemory());
-    Serial.print(F("CONNECTED AFTER GCM COMPUTE: "));
-    Serial.println(client.connected());
+    // Serial.print(F("SRAM AFTER TAG: "));
+    // Serial.println(getFreeMemory());
+    // Serial.print(F("CONNECTED AFTER GCM COMPUTE: "));
+    // Serial.println(client.connected());
 
     // --------------------------------------------------
     // TLS record length:
@@ -781,15 +793,15 @@ Serial.println(getFreeMemory());
     // --------------------------------------------------
     // TLS record header
     // --------------------------------------------------
-    Serial.print(F("CONNECTED BEFORE AVAILABLE: "));
-    Serial.println(client.connected());
-    Serial.print(F("AVAILABLE BEFORE GCM: "));
-    Serial.println(client.available());
-    Serial.print(F("CONNECTED BEFORE GCM: "));
-    Serial.println(client.connected());
+    // Serial.print(F("CONNECTED BEFORE AVAILABLE: "));
+    // Serial.println(client.connected());
+    // Serial.print(F("AVAILABLE BEFORE GCM: "));
+    // Serial.println(client.available());
+    // Serial.print(F("CONNECTED BEFORE GCM: "));
+    // Serial.println(client.connected());
     if (!client.connected())
     {
-        showStage(202);
+        // showStage(202);
         return false;
     }
 
@@ -809,7 +821,7 @@ Serial.println(getFreeMemory());
                 (uint8_t)(tlsWriteSequence >> (i * 8))
             ) != 1)
         {
-            Serial.println(F("GCM NONCE WRITE FAIL"));
+            // Serial.println(F("GCM NONCE WRITE FAIL"));
             return false;
         }
     }
@@ -822,7 +834,7 @@ Serial.println(getFreeMemory());
     {
         if (client.write(plaintext[i]) != 1)
         {
-            Serial.println(F("GCM CIPHERTEXT WRITE FAIL"));
+            // Serial.println(F("GCM CIPHERTEXT WRITE FAIL"));
             return false;
         }
     }
@@ -833,9 +845,9 @@ Serial.println(getFreeMemory());
 
     for (uint8_t i = 0; i < 16; i++)
     {
-        if (client.write(tag[i]) != 1)
+        if (client.write(counter[i]) != 1)
         {
-            Serial.println(F("GCM AUTHENTICATION TAG WRITE FAIL"));
+            // Serial.println(F("GCM AUTHENTICATION TAG WRITE FAIL"));
             return false;
         }
     }
@@ -1390,7 +1402,7 @@ void tlsPrfSha256(
             secretLength,
             tlsPrfInput,
             32 + labelSeedLength,
-            tlsPrfBlock
+            tlsHmacInnerHash
         );
 
         uint16_t remaining = outputLength - produced;
@@ -1398,7 +1410,7 @@ void tlsPrfSha256(
             remaining < 32 ? remaining : 32;
 
         for (uint8_t i = 0; i < copyLength; i++)
-            output[produced + i] = tlsPrfBlock[i];
+            output[produced + i] = tlsHmacInnerHash[i];
 
         produced += copyLength;
 
@@ -1408,17 +1420,17 @@ void tlsPrfSha256(
             secretLength,
             tlsPrfA,
             32,
-            tlsPrfBlock
+            tlsHmacInnerHash
         );
 
         for (uint8_t i = 0; i < 32; i++)
-            tlsPrfA[i] = tlsPrfBlock[i];
+            tlsPrfA[i] = tlsHmacInnerHash[i];
     }
 }
 
 void deriveTLSKeys()
 {
-    uint8_t tlsKeyBlock[40];
+    //uint8_t tlsKeyBlock[40];
     // client_random || server_random
     for (uint8_t i = 0; i < 32; i++)
     {
@@ -1428,15 +1440,16 @@ void deriveTLSKeys()
 
     const uint8_t masterLabel[] PROGMEM = "master secret";
 
-    uint8_t premasterSecret[32];
-
-    for (uint8_t i = 0; i < 32; i++)
+    for (uint8_t i = 0; i < 16; i++)
     {
-        premasterSecret[i] = ecdheSharedSecret.v[31 - i];
+        uint8_t t = ecdheSharedSecret.v[i];
+        ecdheSharedSecret.v[i] =
+            ecdheSharedSecret.v[31 - i];
+        ecdheSharedSecret.v[31 - i] = t;
     }
 
     tlsPrfSha256(
-        premasterSecret,
+        ecdheSharedSecret.v,
         32,
         masterLabel,
         13,
@@ -1463,19 +1476,19 @@ void deriveTLSKeys()
         13,
         tlsHmacKeyBlock,
         64,
-        tlsKeyBlock,
+        tlsPrfInput,
         40
     );
 
     for (uint8_t i = 0; i < 16; i++)
-        clientWriteKey[i] = tlsKeyBlock[i];
+        clientWriteKey[i] = tlsPrfInput[i];
 
     for (uint8_t i = 0; i < 4; i++)
-        clientWriteIV[i] = tlsKeyBlock[32 + i];
+        clientWriteIV[i] = tlsPrfInput[32 + i];
     for (uint8_t i = 0; i < 16; i++)
-        serverWriteKey[i] = tlsKeyBlock[16 + i];
+        serverWriteKey[i] = tlsPrfInput[16 + i];
     for (uint8_t i = 0; i < 4; i++)
-        serverWriteIV[i] = tlsKeyBlock[36 + i];
+        serverWriteIV[i] = tlsPrfInput[36 + i];
 }
 
 
@@ -1819,10 +1832,15 @@ bool readTLSByte(uint8_t &value)
   while (!client.available())
   {
     if (!client.connected())
+    { 
+        //Serial.println("D");
       return false;
+    }
 
     if (millis() - start >= 5000)
+    {//Serial.println("T");
       return false;
+    }
 
     delay(1);
   }
@@ -1954,23 +1972,12 @@ bool readTLSRecordHeader(
     recordLength =
         ((uint16_t)b3 << 8) | b4;
 
-    showStage(b0);
-    delay(2000);
-
-    showStage(b1);
-    delay(2000);
-
-    showStage(b2);
-    delay(2000);
-
-    showStage(b3);
-    delay(2000);
-
-    showStage(b4);
-    delay(2000);
-
-    showStage(recordLength);
-    delay(3000);
+    // showStage(b0);
+    // showStage(b1);
+    // showStage(b2);
+    // showStage(b3);
+    // showStage(b4);
+    // showStage(recordLength);
 
     return true;
 }
@@ -2560,28 +2567,7 @@ void pointProjectiveToAffineX(U256 &result, const PointProjective &p)
   // X / Z²
   modMul256(result, p.x, ecc.temp2);
 }
-
-void testScalarMultiplication()
-{
- // modMulCount = 0;
-
-  U256 k;
-  zero256(k);
-
-  // k = 0x010101...0101
-  for (int i = 0; i < 32; i++)
-    k.v[i] = 0x01;
-
-  PointProjective r;
-
-  // r = k × G
-  pointScalarMultiplyGeneratorProjective(r, k);
-  U256 x;
-
-  // Convert only X coordinate back to affine.
-  pointProjectiveToAffineX(x, r);
-  print256(x);
-}
+/*
 void printU256Hex(const U256 &x)
 { for (int8_t i = 31; i >= 0; i--)
     {
@@ -2592,29 +2578,7 @@ void printU256Hex(const U256 &x)
     }
     {
     Serial.println();}
-}
-void testScalarMultiplicationProjective()
-{
-  U256 scalar;
-  Point generator;
-  PointProjective result;
-  Point affine;
-
-  // k = 1
-  zero256(scalar);
-  scalar.v[31] = 1;
-
-  // P-256 generator
-  fromBigEndianProgmem(generator.x, P256_GX_BE);
-  fromBigEndianProgmem(generator.y, P256_GY_BE);
-
-  pointScalarMultiplyProjective(result, scalar, generator);
-
-  pointProjectiveToAffine(affine, result);
-
-  printU256Hex(affine.x);
-  printU256Hex(affine.y);
-}
+}*/
 
 size_t sendClientKeyExchange(const Point &publicKey)
 {
@@ -2882,16 +2846,15 @@ uint8_t tlsReadServerHandshake()
     uint8_t contentType, versionMajor, versionMinor;
     uint16_t recordLength;
     if (!readTLSRecordHeader(contentType, versionMajor, versionMinor, recordLength)) {
-        showStage(81); // Header read failed
+        // showStage(81); // Header read failed
         return 81;
     }
 
-    if (contentType == 0x14 && recordLength == 1) {
-        // This is the expected ChangeCipherSpec record
-        // TLS CCS, but wrong record length
-        showStage(145);
-        delay(7000);
-    } 
+    Serial.print(F("SERVER CT="));
+    Serial.println(contentType, HEX);
+    Serial.print(F("SERVER RL="));
+    Serial.println(recordLength);
+
     // Expect ChangeCipherSpec record (type 0x14, length 1)
     if (contentType != 0x14 || recordLength != 1)
     {
@@ -2902,92 +2865,107 @@ uint8_t tlsReadServerHandshake()
             // TLS ALERT
             uint8_t alertLevel;
             uint8_t alertDescription;
+            if (!readTLSByte(alertLevel) ||
+                !readTLSByte(alertDescription))
+            {
+                return 82;
+            }
 
-            readTLSByte(alertLevel);
-            readTLSByte(alertDescription);
+            Serial.print(F("ALERT level="));
+            Serial.println(alertLevel, HEX);
+
+            Serial.print(F("ALERT desc="));
+            Serial.println(alertDescription, HEX);
 
             // Show alert description
-            showStage(alertDescription);
-            delay(7000);
+            // showStage(alertDescription);
+
 
             // Show the record length
-            showStage(recordLength);
-            delay(7000);
+            // showStage(recordLength);
+
         }
         else if (contentType == 0x16)
         {
             // TLS HANDSHAKE
-            showStage(160);
-            delay(7000);
+            // showStage(160);
+
 
             // Show record length
-            showStage(recordLength);
-            delay(7000);
+            // showStage(recordLength);
+
         }
         else if (contentType == 0x14)
         {
             // TLS CCS, but wrong record length
-            showStage(140);
-            delay(7000);
-
+            // showStage(140);
             // Show record length
-            showStage(recordLength);
-            delay(7000);
+            // showStage(recordLength);
         }
         else
         {
             // Unknown content type
-            showStage(contentType);
-            delay(7000);
+            // showStage(contentType);
 
             // Show record length
-            showStage(recordLength);
-            delay(7000);
+            // showStage(recordLength);
+
         }
 
         return 82;
     }
     uint8_t ccs;
     if (!readTLSByte(ccs)) {
-        showStage(83);
+        // showStage(83);
         return 83;
     }
     if (ccs != 0x01) {
-        showStage(84); // Payload must be 0x01 for CCS
+        // showStage(84); // Payload must be 0x01 for CCS
         return 84;
     }
-    showStage(85); // Server CCS received and processed
+    // showStage(85); // Server CCS received and processed
 
     // --- READ SERVER FINISHED (Encrypted) ---
     if (!readTLSRecordHeader(contentType, versionMajor, versionMinor, recordLength)) {
-        showStage(86);
+        // showStage(86);
         return 86;
     }
     if (contentType != 0x16) { 
-        showStage(87); // Expected handshake record
+        // showStage(87); // Expected handshake record
         return 87;
     }
     // TLS1.2 AES-GCM Finished record: 8B explicit nonce + 16B ciphertext + 16B tag = 40 bytes
     if (recordLength != 40) {
-        showStage(88); // Unexpected record length
+        // showStage(88); // Unexpected record length
         return 88;
     }
     // Read 8-byte explicit nonce
     uint8_t explicitNonce[8];
     for (uint8_t i = 0; i < 8; i++) {
-        if (!readTLSByte(explicitNonce[i])) { showStage(89); return 89; }
+        if (!readTLSByte(explicitNonce[i])) { /* showStage(89); */ return 89; }
     }
     // Read 16-byte ciphertext (Finished payload)
     uint8_t ciphertext[16];
     for (uint8_t i = 0; i < 16; i++) {
-        if (!readTLSByte(ciphertext[i])) { showStage(91); return 91; }
+        if (!readTLSByte(ciphertext[i])) { /* showStage(91); */ return 91; }
     }
     // Read 16-byte auth tag
     uint8_t receivedTag[16];
-    for (uint8_t i = 0; i < 16; i++) {
-        if (!readTLSByte(receivedTag[i])) { showStage(92); return 92; }
-    }
+    for (uint8_t i = 0; i < 16; i++)
+    {
+        if (!readTLSByte(receivedTag[i]))
+        {
+            //Serial.print(F("TAG READ FAILED AT BYTE: "));
+            //Serial.println(i);
+            return 92;
+        }
 
+        // Serial.print(F("TAG BYTE "));
+        // Serial.print(i);
+        // Serial.print(F(" = "));
+        // Serial.println(receivedTag[i], HEX);
+    }
+    //Serial.println(F("ALL 16 TAG BYTES RECEIVED"));
     // --- VERIFY GCM TAG (Server Finished) ---
     // Build 12-byte nonce = serverWriteIV (4 bytes) || explicitNonce (8 bytes)
     uint8_t nonce[12];
@@ -3005,11 +2983,11 @@ uint8_t tlsReadServerHandshake()
     gcmMakeTag(serverWriteKey, nonce, aad, 13, ciphertext, 16, calcTag);
     for (uint8_t i = 0; i < 16; i++) {
         if (calcTag[i] != receivedTag[i]) {
-            showStage(93); // GCM authentication failed
+            // showStage(93); // GCM authentication failed
             return 93;
         }
     }
-    showStage(94); // GCM tag verified
+    // showStage(94); // GCM tag verified
 
     // --- DECRYPT SERVER FINISHED ---
     // CTR decrypt: set counter = nonce || 0x00000001 (i.e. initial counter J0 incremented)
@@ -3027,18 +3005,18 @@ uint8_t tlsReadServerHandshake()
     if (ciphertext[0] != 0x14 || ciphertext[1] != 0x00 ||
         ciphertext[2] != 0x00 || ciphertext[3] != 0x0C) 
     {
-        showStage(95); // Malformed Finished header
+        // showStage(95); // Malformed Finished header
         return 95;
     }
     // Compute expected verify_data = PRF(master_secret, "server finished", Hash(transcript))
     uint8_t serverHash[32];
     tlsTranscriptFinal(serverHash);
     const uint8_t label[] PROGMEM = "server finished";
-    tlsPrfSha256(tlsMasterSecret, 48, label, 15, serverHash, 32, tlsPrfBlock, 12);
+    tlsPrfSha256(tlsMasterSecret, 48, label, 15, serverHash, 32, tlsHmacInnerHash, 12);
     // Compare against decrypted verify_data (bytes 4..15)
     for (uint8_t i = 0; i < 12; i++) {
-        if (ciphertext[4 + i] != tlsPrfBlock[i]) {
-            showStage(96); // Finished verify_data mismatch
+        if (ciphertext[4 + i] != tlsHmacInnerHash[i]) {
+            // showStage(96); // Finished verify_data mismatch
             return 96;
         }
     }
@@ -3049,82 +3027,54 @@ uint8_t tlsReadServerHandshake()
         tlsTranscriptUpdateByte(ciphertext[i]);
     }
     tlsReadSequence++;  // increment server record sequence
-    showStage(97);      // Server Finished verified
+    // showStage(97);      // Server Finished verified
     return 90;          // Handshake complete
+}
+
+bool networkConnect()
+{
+    DNSClient dnsClient;
+
+    IPAddress ip;
+    IPAddress dnsIP = Ethernet.dnsServerIP();
+
+    dnsClient.begin(dnsIP);
+    const char *hostname = "api.coinpaprika.com";
+    const uint16_t port = 443;
+    if (dnsClient.getHostByName(hostname, ip) != 1)
+        return false;
+
+    return client.connect(ip, port);
 }
 
 uint8_t runTLS()
 {
-    // =======================================================
-    // RESET TLS STATE
-    // =======================================================
-
-    tlsWriteSequence = 0;
-    tlsReadSequence = 0;
-    tlsTranscriptRecord = false;
-    uint16_t freeBeforeConnect = getFreeMemory();
-
-    //lcdFillScreen(0x0000);
-    //lcdNumber(
-    //    freeBeforeConnect,
-    //    60,
-    //    100,
-    //    0x07E0
-    //);
-
-    delay(3000);
-    freeBeforeConnect = getFreeMemory();
-
-    Serial.println(F("TLS START"));
-
-    Serial.print(F("Free SRAM before connect: "));
-    Serial.println(getFreeMemory());
-
-    Serial.println(F("Calling hostname connect..."));
-
-
-    IPAddress dnsIP = Ethernet.dnsServerIP();
-    IPAddress apiIP;
-
-    dnsClient.begin(dnsIP);
-
-    if (dnsClient.getHostByName("api.coinpaprika.com", apiIP) != 1)
+    if (!networkConnect())
     {
-        Serial.println(F("FAIL 11: DNS RESOLUTION"));
-        return 11;
-    }
-
-    Serial.print(F("Resolved IP: "));
-    Serial.println(apiIP);
-
-    if (!client.connect(apiIP, 443))
-    {
-        Serial.println(F("FAIL 12: TLS TCP CONNECT"));
         return 12;
     }
-    Serial.println(F("HOSTNAME CONNECT OK"));
-    showStage(10);
+
+    // showStage(10);
     // =======================================================
     // CLIENT HELLO
     // =======================================================
 
     tlsTranscriptInit();
-    Serial.println(F("SENDING CLIENT HELLO"));
+    // Serial.println(F("SENDING CLIENT HELLO"));
     size_t sent = sendClientHello();
-    Serial.print(F("CLIENT HELLO SENT: "));
-    Serial.println(sent);
+    // Serial.print(F("CLIENT HELLO SENT: "));
+    // Serial.println(sent);
     if (sent != clientHelloLength)
     {
-        Serial.println(F("FAIL 15: CLIENT HELLO SEND"));
+        // Serial.println(F("FAIL 15: CLIENT HELLO SEND"));
         return 15;
     }
-
-    showStage(20);
+    // showStage(20);
 
     // =======================================================
     // RECEIVE TLS RECORDS
     // =======================================================
-    Serial.println(F("WAITING FOR SERVER"));
+    // Serial.println(F("WAITING FOR SERVER"));
     unsigned long start = millis();
     
     while (millis() - start < 15000UL)
@@ -3137,6 +3087,7 @@ uint8_t runTLS()
 
         while (client.connected())
         {
+            //Serial.println(F("rt: Connected"));
             tlsTranscriptRecord = false;
 
             uint8_t contentType;
@@ -3147,22 +3098,19 @@ uint8_t runTLS()
             // ---------------------------------------------------
             // TLS RECORD HEADER
             // ---------------------------------------------------
-
             if (!readTLSRecordHeader(
                     contentType,
                     versionMajor,
                     versionMinor,
                     recordLength))
             {
-                Serial.println(F("FAIL 20: RECORD HEADER"));
+                // Serial.println(F("FAIL 20: RECORD HEADER"));
                 return 20;
             }
-            Serial.print(F("RECORD TYPE: "));
-            Serial.println(contentType);
-
-            Serial.print(F("RECORD LENGTH: "));
-            Serial.println(recordLength);
-
+            // Serial.print(F("TYPE="));
+            // Serial.print(contentType, HEX);
+            // Serial.print(F(" LEN="));
+            // Serial.println(recordLength);
 
             tlsTranscriptRecord = (contentType == 0x16);
             // ===================================================
@@ -3171,32 +3119,33 @@ uint8_t runTLS()
 
             if (contentType == 0x16)
             {
-                uint8_t firstByte;
+                 uint8_t firstByte;
 
-                if (!readTLSByte(firstByte))
-                {
-                    Serial.println(F("FAIL 21: HANDSHAKE FIRST BYTE"));
-                    return 21;
-                }
+                    if (!readTLSByte(firstByte))
+                    {
+                        return 21;
+                    }
 
+                    //showStage(firstByte);
+                    //showStage(recordLength);
                 // =================================================
                 // SERVER HELLO
                 // =================================================
-
+                Serial.println(firstByte, HEX);  
                 if (firstByte == 0x02)
                 {
                     uint32_t handshakeLength;
 
                     if (!readTLSU24(handshakeLength))
                     {
-                        Serial.println(F("FAIL 22: HANDSHAKE LENGTH"));
+                        // Serial.println(F("FAIL 22: HANDSHAKE LENGTH"));
                         return 22;
                     }
 
                     if (!readTLSByte(versionMajor) ||
                         !readTLSByte(versionMinor))
                     {
-                        Serial.println(F("FAIL 22: VERSION"));
+                        // Serial.println(F("FAIL 22: VERSION"));
                         return 22;
                     }
 
@@ -3205,7 +3154,7 @@ uint8_t runTLS()
                     {
                         if (!readTLSByte(serverRandom[i]))
                         {
-                            Serial.println(F("FAIL 22: SERVER RANDOM"));
+                            // Serial.println(F("FAIL 22: SERVER RANDOM"));
                             return 22;
                         }
                     }
@@ -3215,13 +3164,13 @@ uint8_t runTLS()
 
                     if (!readTLSByte(sessionIdLength))
                     {
-                        Serial.println(F("FAIL 22: SESSION ID LENGTH"));
+                        // Serial.println(F("FAIL 22: SESSION ID LENGTH"));
                         return 22;
                     }
 
                     if (!consumeTLSBytes(sessionIdLength))
                     {
-                        Serial.println(F("FAIL 22: SESSION ID"));
+                        // Serial.println(F("FAIL 22: SESSION ID"));
                         return 22;
                     }
 
@@ -3229,7 +3178,7 @@ uint8_t runTLS()
                     uint16_t cipherSuite;
                     if (!readTLSU16(cipherSuite))
                     {
-                        Serial.println(F("FAIL 22: CIPHER SUITE"));
+                        // Serial.println(F("FAIL 22: CIPHER SUITE"));
                         return 22;
                     }
 
@@ -3238,13 +3187,13 @@ uint8_t runTLS()
 
                     if (!readTLSByte(compressionMethod))
                     {
-                        Serial.println(F("FAIL 22: COMPRESSION METHOD"));
+                        // Serial.println(F("FAIL 22: COMPRESSION METHOD"));
                         return 22;
                     }
 
                     if (compressionMethod != 0x00)
                     {
-                        Serial.println(F("FAIL 23: COMPRESSION METHOD NOT NULL"));
+                        // Serial.println(F("FAIL 23: COMPRESSION METHOD NOT NULL"));
                         return 23;
                     }
 
@@ -3253,18 +3202,18 @@ uint8_t runTLS()
 
                     if (!readTLSU16(extensionsLength))
                     {
-                        Serial.println(F("FAIL 22: EXTENSIONS LENGTH"));
+                        // Serial.println(F("FAIL 22: EXTENSIONS LENGTH"));
                         return 22;
                     }
 
                     if (!consumeTLSBytes(extensionsLength))
                     {
-                        Serial.println(F("FAIL 22: EXTENSIONS"));
+                        // Serial.println(F("FAIL 22: EXTENSIONS"));
                         return 22;
                     }
 
                     // ServerHello succeeded.
-                    showStage(30);
+                    // showStage(30);
                 }
 
                 // =================================================
@@ -3277,14 +3226,14 @@ uint8_t runTLS()
 
                     if (!readTLSU24(handshakeLength))
                     {
-                        Serial.println(F("FAIL 30: SERVER KEY EXCHANGE LENGTH"));
+                        // Serial.println(F("FAIL 30: SERVER KEY EXCHANGE LENGTH"));
                         return 30;
                     }
 
                     if (handshakeLength !=
                         (uint32_t)(recordLength - 4))
                     {
-                        Serial.println(F("FAIL 30: SERVER KEY EXCHANGE SIZE"));
+                        // Serial.println(F("FAIL 30: SERVER KEY EXCHANGE SIZE"));
                         return 30;
                     }
 
@@ -3296,7 +3245,7 @@ uint8_t runTLS()
 
                     if (!readTLSByte(curveType))
                     {
-                        Serial.println(F("FAIL 31: CURVE TYPE"));
+                        // Serial.println(F("FAIL 31: CURVE TYPE"));
                         return 31;
                     }
 
@@ -3304,14 +3253,14 @@ uint8_t runTLS()
 
                     if (!readTLSU16(namedCurve))
                     {
-                        Serial.println(F("FAIL 31: NAMED CURVE"));
+                        // Serial.println(F("FAIL 31: NAMED CURVE"));
                         return 31;
                     }
 
                     if (curveType != 0x03 ||
                         namedCurve != 0x0017)
                     {
-                        Serial.println(F("FAIL 31: UNSUPPORTED CURVE"));
+                        // Serial.println(F("FAIL 31: UNSUPPORTED CURVE"));
                         return 31;
                     }
 
@@ -3323,13 +3272,13 @@ uint8_t runTLS()
 
                     if (!readTLSByte(pointLength))
                     {
-                        Serial.println(F("FAIL 32: EC POINT LENGTH"));
+                        // Serial.println(F("FAIL 32: EC POINT LENGTH"));
                         return 32;
                     }
 
                     if (pointLength != 65)
                     {
-                        Serial.println(F("FAIL 32: INVALID EC POINT LENGTH"));
+                        // Serial.println(F("FAIL 32: INVALID EC POINT LENGTH"));
                         return 32;
                     }
 
@@ -3337,13 +3286,13 @@ uint8_t runTLS()
 
                     if (!readTLSByte(pointFormat))
                     {
-                        Serial.println(F("FAIL 32: EC POINT FORMAT"));
+                        // Serial.println(F("FAIL 32: EC POINT FORMAT"));
                         return 32;
                     }
 
                     if (pointFormat != 0x04)
                     {
-                        Serial.println(F("FAIL 32: UNSUPPORTED EC POINT FORMAT"));
+                        // Serial.println(F("FAIL 32: UNSUPPORTED EC POINT FORMAT"));
                         return 32;
                     }
 
@@ -3354,7 +3303,7 @@ uint8_t runTLS()
 
                         if (!readTLSByte(value))
                         {
-                            Serial.println(F("FAIL 32: SERVER EC POINT X"));
+                            // Serial.println(F("FAIL 32: SERVER EC POINT X"));
                             return 32;
                         }
 
@@ -3368,7 +3317,7 @@ uint8_t runTLS()
 
                         if (!readTLSByte(value))
                         {
-                            Serial.println(F("FAIL 32: SERVER EC POINT Y"));
+                            // Serial.println(F("FAIL 32: SERVER EC POINT Y"));
                             return 32;
                         }
 
@@ -3401,60 +3350,74 @@ uint8_t runTLS()
                     // ------------------------------------------------
                     // SHARED SECRET = d * SERVER PUBLIC
                     // ------------------------------------------------
-
+                    //Serial.println("S");
                     pointScalarMultiplyProjective(
                         ecdhePoint,
                         ecdhePrivate,
                         ecc.point1
                     );
-
+                    //Serial.println("M");
                     pointProjectiveToAffineX(
                         ecdheSharedSecret,
                         ecdhePoint
                     );
-
+                    //Serial.println("A");
                     // ------------------------------------------------
                     // TLS KEYS
                     // ------------------------------------------------
-
-                    deriveTLSKeys();
-
+                    
+                      
                     // ------------------------------------------------
                     // Signature
                     // ------------------------------------------------
 
                     uint8_t hashAlgorithm;
                     uint8_t signatureAlgorithm;
-
-                    if (!readTLSByte(hashAlgorithm) ||
-                        !readTLSByte(signatureAlgorithm))
-                    {
-                        Serial.println(F("FAIL 36: SIGNATURE ALGORITHMS"));
-                        return 36;
-                    }
-
                     uint16_t signatureLength;
 
-                    if (!readTLSU16(signatureLength))
+                    /*Serial.print(F("CT="));
+                    Serial.println(contentType);
+                    Serial.print(F("RL="));
+                    Serial.println(recordLength);*/
+
+                    if (!readTLSByte(hashAlgorithm))
                     {
-                        Serial.println(F("FAIL 36: SIGNATURE LENGTH"));
                         return 36;
                     }
+
+                    if (!readTLSByte(signatureAlgorithm))
+                    {
+                        return 36;
+                    }
+
+                    //Serial.println(F("SB"));
+                    if (!readTLSU16(signatureLength))
+                    {
+                        //Serial.println(F("SLF"));
+                        return 36;
+                    }
+
+                    //Serial.print(F("SL="));
+                    //Serial.println(signatureLength);
 
                     if (!consumeTLSBytes(signatureLength))
                     {
-                        Serial.println(F("FAIL 36: SIGNATURE DATA"));
+                        //Serial.println(F("SDF"));
                         return 36;
                     }
-                    showStage(40);
+                    //Serial.println(F("SO"));
+                    deriveTLSKeys();   
+                    // showStage(40);
                 }
 
                 // =================================================
                 // SERVER HELLO DONE
                 // =================================================
-
+                //Serial.print(F("FB="));
+                           
                 else if (firstByte == 0x0E)
                 {
+                    Serial.println(F("SHD"));
                     uint8_t b1;
                     uint8_t b2;
                     uint8_t b3;
@@ -3463,56 +3426,56 @@ uint8_t runTLS()
                         !readTLSByte(b2) ||
                         !readTLSByte(b3))
                     {
-                        Serial.println(F("FAIL 40: SERVER HELLO DONE LENGTH"));
-                        return 40;
+                        return 41;
                     }
 
                     if (b1 != 0 ||
                         b2 != 0 ||
                         b3 != 0)
                     {
-                        Serial.println(F("FAIL 41: SERVER HELLO DONE CONTENT"));
                         return 41;
                     }
-                    Serial.print(F("AFTER SERVER HELLO DONE - CONNECTED: "));
-                    Serial.println(client.connected());
 
-                    Serial.print(F("AFTER SERVER HELLO DONE - AVAILABLE: "));
-                    Serial.println(client.available());
-                    showStage(50);
+                    // showStage(recordLength);
+                    
+
+                    // showStage(client.available());
+                    
+
+                    // showStage(50);
                     // ------------------------------------------------
                     // CLIENT KEY EXCHANGE
                     // ------------------------------------------------
 
-                    Serial.println(F("CLIENT PUBLIC KEY:"));
+                    // Serial.println(F("CLIENT PUBLIC KEY:"));
 
-                    Serial.print(F("X: "));
-                    printU256Hex(ecdheClientPublic.x);
+                    // Serial.print(F("X: "));
+                    //printU256Hex(ecdheClientPublic.x);
 
-                    Serial.print(F("Y: "));
-                    printU256Hex(ecdheClientPublic.y);
+                    // Serial.print(F("Y: "));
+                    //printU256Hex(ecdheClientPublic.y);
 
-                    Serial.print(F("CONNECTED BEFORE CKX: "));
-                    Serial.println(client.connected());
+                    // Serial.print(F("CONNECTED BEFORE CKX: "));
+                    // Serial.println(client.connected());
 
                     size_t ckxSent = sendClientKeyExchange(ecdheClientPublic);
 
-                    Serial.print(F("CKX SENT: "));
-                    Serial.println(ckxSent);
+                    // Serial.print(F("CKX SENT: "));
+                    // Serial.println(ckxSent);
 
-                    Serial.print(F("CONNECTED AFTER CKX: "));
-                    Serial.println(client.connected());
+                    // Serial.print(F("CONNECTED AFTER CKX: "));
+                    // Serial.println(client.connected());
 
-                    Serial.print(F("AVAILABLE AFTER CKX: "));
-                    Serial.println(client.available());
+                    // Serial.print(F("AVAILABLE AFTER CKX: "));
+                    // Serial.println(client.available());
 
                     if (ckxSent != 75)
                     {
-                        Serial.println(F("FAIL 42: CLIENT KEY EXCHANGE SEND"));
+                        // Serial.println(F("FAIL 42: CLIENT KEY EXCHANGE SEND"));
                         return 42;
                     }
 
-                    showStage(60);
+                    // showStage(60);
 
                     // ------------------------------------------------
                     // ADD CLIENT KEY EXCHANGE TO TRANSCRIPT
@@ -3543,7 +3506,7 @@ uint8_t runTLS()
                     // TRANSCRIPT HASH
                     // ------------------------------------------------
 
-                    tlsTranscriptFinal(tlsTranscriptHash);
+                    tlsTranscriptFinal(tlsPrfA);
 
                     // ------------------------------------------------
                     // CLIENT FINISHED VERIFY DATA
@@ -3557,9 +3520,9 @@ uint8_t runTLS()
                         48,
                         clientFinishedLabel,
                         15,
-                        tlsTranscriptHash,
+                        tlsPrfA,
                         32,
-                        tlsPrfBlock,
+                        tlsHmacInnerHash,
                         12
                     );
 
@@ -3569,32 +3532,32 @@ uint8_t runTLS()
 
                     for (int8_t i = 11; i >= 0; i--)
                     {
-                        tlsPrfBlock[4 + i] =
-                            tlsPrfBlock[i];
+                        tlsHmacInnerHash[4 + i] =
+                            tlsHmacInnerHash[i];
                     }
-                    Serial.print(F("CONNECTED BEFORE FINISHED COMPUTE: "));
-                    Serial.println(client.connected());
-                    tlsPrfBlock[0] = 0x14;
-                    tlsPrfBlock[1] = 0x00;
-                    tlsPrfBlock[2] = 0x00;
-                    tlsPrfBlock[3] = 0x0C;
+                    // Serial.print(F("CONNECTED BEFORE FINISHED COMPUTE: "));
+                    // Serial.println(client.connected());
+                    tlsHmacInnerHash[0] = 0x14;
+                    tlsHmacInnerHash[1] = 0x00;
+                    tlsHmacInnerHash[2] = 0x00;
+                    tlsHmacInnerHash[3] = 0x0C;
                     for (uint8_t i = 0; i < 16; i++)
                     {
-                        tlsTranscriptUpdateByte(tlsPrfBlock[i]);
+                        tlsTranscriptUpdateByte(tlsHmacInnerHash[i]);
                     }
-                    Serial.print(F("CONNECTED AFTER FINISHED COMPUTE: "));
-                    Serial.println(client.connected());
+                    // Serial.print(F("CONNECTED AFTER FINISHED COMPUTE: "));
+                    // Serial.println(client.connected());
                     // ------------------------------------------------
                     // CHANGE CIPHER SPEC
                     // ------------------------------------------------
 
                     if (!tlsSendChangeCipherSpec())
                     {
-                        Serial.println(F("FAIL 52: CHANGE CIPHER SPEC SEND"));
+                        // Serial.println(F("FAIL 52: CHANGE CIPHER SPEC SEND"));
                         return 52;
                     }
 
-                    showStage(70);
+                    // showStage(70);
 
                     // ------------------------------------------------
                     // FIRST ENCRYPTED RECORD
@@ -3604,24 +3567,26 @@ uint8_t runTLS()
 
                     if (!tlsSendGCMRecord(
                             0x16,
-                            tlsPrfBlock,
+                            tlsHmacInnerHash,
                             16))
                     {
-                        Serial.println(F("FAIL 53: FINISHED RECORD SEND"));
+                        // Serial.println(F("FAIL 53: FINISHED RECORD SEND"));
                         return 53;
                     }
 
-                    showStage(80);
-
+                    // showStage(80);
+                    //Serial.println(F("B"));
                     // NOW WAIT FOR SERVER CCS + SERVER FINISHED
                     uint8_t serverStage = tlsReadServerHandshake();
+                    Serial.print("ZZ=");
+                    Serial.println(serverStage);        
 
                     if (serverStage != 90)
                     {
                         return serverStage;
                     }
 
-                    showStage(90);
+                    // showStage(90);
                     return 90;
                    
                 }
@@ -3634,7 +3599,7 @@ uint8_t runTLS()
                 {
                     if (recordLength == 0)
                     {
-                        Serial.println(F("FAIL 21: UNKNOWN EMPTY HANDSHAKE"));
+                        // Serial.println(F("FAIL 21: UNKNOWN EMPTY HANDSHAKE"));
                         return 21;
                     }
 
@@ -3646,7 +3611,7 @@ uint8_t runTLS()
 
                         if (!readTLSByte(value))
                         {
-                            Serial.println(F("FAIL 21: UNKNOWN HANDSHAKE DATA"));
+                            // Serial.println(F("FAIL 21: UNKNOWN HANDSHAKE DATA"));
                             return 21;
                         }
                     }
@@ -3660,7 +3625,7 @@ uint8_t runTLS()
             else if (contentType == 0x15)
             {
                 consumeTLSBytes(recordLength);
-                Serial.println(F("FAIL 90: TLS ALERT"));
+                // Serial.println(F("FAIL 90: TLS ALERT"));
                 return 90;
             }
 
@@ -3672,7 +3637,7 @@ uint8_t runTLS()
             {
                 if (!consumeTLSBytes(recordLength))
                 {
-                    Serial.println(F("FAIL 91: UNKNOWN TLS RECORD"));
+                    // Serial.println(F("FAIL 91: UNKNOWN TLS RECORD"));
                     return 91;
                 }
             }
@@ -3680,12 +3645,12 @@ uint8_t runTLS()
 
         if (!client.connected())
         {
-            Serial.println(F("FAIL 92: SERVER DISCONNECTED"));
+            // Serial.println(F("FAIL 92: SERVER DISCONNECTED"));
             return 92;
         }
     }
 
-    Serial.println(F("FAIL 93: SERVER RESPONSE TIMEOUT"));
+    // Serial.println(F("FAIL 93: SERVER RESPONSE TIMEOUT"));
     return 93;
 }
 
@@ -3751,6 +3716,7 @@ uint8_t diagnoseTCP()
     return 70;
 }
 
+/*
 void showStage(uint8_t stage)
 {
     lcdFillScreen(0x0000);
@@ -3762,6 +3728,7 @@ void showStage(uint8_t stage)
         0x07E0
     );
 }
+*/
 
 void printIP(const IPAddress &ip)
 {
@@ -3814,24 +3781,33 @@ static bool tlsSendHttpGet()
 
 void setup()
 {   
+    #ifdef TURN_LCD_ON
     lcdInit();
+    #endif
     Serial.begin(115200);
     delay(1000);
 
     if (Ethernet.begin(mac) == 0)
     {
+        //Serial.println(F("Failed to configure Ethernet using DHCP"));
+        #ifdef TURN_LCD_ON
         lcdFillScreen(0x0000);
         lcdNumber(1, 60, 100, 0xF800);   // DHCP FAIL
-        while (1);
+        #endif
+        while (1)
+            ;
+            
+    }
+    else
+    {
+        //Serial.print(F("IP+"));
+        //Serial.println(Ethernet.localIP());
     }
 
     delay(1000);
 
     uint8_t stage = runTLS();
-
-    
-
-    
+    #ifdef TURN_LCD_ON    
     lcdFillScreen(0x0000);
     lcdNumber(
         stage,
@@ -3839,7 +3815,7 @@ void setup()
         100,
         stage >= 60 ? 0x07E0 : 0xF800
     );
-
+    #endif
     while (1);
 }
 

@@ -2,6 +2,7 @@
 #define LCD_H
 
 #include <Arduino.h>
+#include "U256.h"
 
 #define LCD_RST A4
 #define LCD_CS  A3
@@ -337,5 +338,144 @@ static void lcdNumber(
     lcdDigit(d3, x + 114, y, color);
 }
 
+/*
+static void lcdHexDigit(
+    uint8_t digit,
+    uint16_t x,
+    uint16_t y,
+    uint16_t color)
+{
+    static const uint8_t segments[16] =
+    {
+        0b1111110, // 0
+        0b0110000, // 1
+        0b1101101, // 2
+        0b1111001, // 3
+        0b0110011, // 4
+        0b1011011, // 5
+        0b1011111, // 6
+        0b1110000, // 7
+        0b1111111, // 8
+        0b1111011, // 9
+
+        0b1110111, // A
+        0b0011111, // b
+        0b1001110, // C
+        0b0111101, // d
+        0b1001111, // E
+        0b1000111  // F
+    };
+
+    uint8_t s = segments[digit & 0x0F];
+
+    const uint16_t w = 30;
+    const uint16_t h = 8;
+    const uint16_t gap = 4;
+
+    // A
+    if (s & 0b1000000)
+        lcdFillRect(x + gap, y, x + w - gap, y + h, color);
+
+    // B
+    if (s & 0b0100000)
+        lcdFillRect(
+            x + w - h,
+            y + gap,
+            x + w,
+            y + 50,
+            color);
+
+    // C
+    if (s & 0b0010000)
+        lcdFillRect(
+            x + w - h,
+            y + 50,
+            x + w,
+            y + 96,
+            color);
+
+    // D
+    if (s & 0b0001000)
+        lcdFillRect(
+            x + gap,
+            y + 96,
+            x + w - gap,
+            y + 96 + h,
+            color);
+
+    // E
+    if (s & 0b0000100)
+        lcdFillRect(
+            x,
+            y + 50,
+            x + h,
+            y + 96,
+            color);
+
+    // F
+    if (s & 0b0000010)
+        lcdFillRect(
+            x,
+            y + gap,
+            x + h,
+            y + 50,
+            color);
+
+    // G
+    if (s & 0b0000001)
+        lcdFillRect(
+            x + gap,
+            y + 46,
+            x + w - gap,
+            y + 54,
+            color);
+}
+
+static void lcdHexDigitBig(
+    uint8_t digit,
+    uint16_t x,
+    uint16_t y,
+    uint16_t color)
+{
+    static const uint8_t font[16][5] =
+    {
+        {0x1F,0x11,0x11,0x11,0x1F}, // 0
+        {0x04,0x0C,0x04,0x04,0x1F}, // 1
+        {0x1F,0x01,0x1F,0x10,0x1F}, // 2
+        {0x1F,0x01,0x0F,0x01,0x1F}, // 3
+        {0x11,0x11,0x1F,0x01,0x01}, // 4
+        {0x1F,0x10,0x1F,0x01,0x1F}, // 5
+        {0x1F,0x10,0x1F,0x11,0x1F}, // 6
+        {0x1F,0x01,0x02,0x04,0x04}, // 7
+        {0x1F,0x11,0x1F,0x11,0x1F}, // 8
+        {0x1F,0x11,0x1F,0x01,0x1F}, // 9
+        {0x1F,0x11,0x1F,0x11,0x11}, // A
+        {0x1E,0x11,0x1E,0x11,0x1E}, // B
+        {0x1F,0x10,0x10,0x10,0x1F}, // C
+        {0x1E,0x11,0x11,0x11,0x1E}, // D
+        {0x1F,0x10,0x1F,0x10,0x1F}, // E
+        {0x1F,0x10,0x1F,0x10,0x10}  // F
+    };
+
+    digit &= 0x0F;
+
+    for (uint8_t row = 0; row < 5; row++)
+    {
+        for (uint8_t col = 0; col < 5; col++)
+        {
+            if (font[digit][row] & (1 << (4 - col)))
+            {
+                lcdFillRect(
+                    x + col * 4,
+                    y + row * 6,
+                    x + col * 4 + 3,
+                    y + row * 6 + 5,
+                    color
+                );
+            }
+        }
+    }
+}
+*/
 
 #endif
