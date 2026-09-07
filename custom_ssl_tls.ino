@@ -409,7 +409,11 @@ static bool tlsSendChangeCipherSpec()
     return true;
 }
 
-static void gcmCtrCrypt(const uint8_t key[16], uint8_t counter[16], uint8_t *data,    uint16_t length)
+static void gcmCtrCrypt(
+    const uint8_t key[16],
+    uint8_t counter[16],
+    uint8_t *data,
+    uint16_t length)
 {
     uint8_t stream[16];
 
@@ -418,7 +422,23 @@ static void gcmCtrCrypt(const uint8_t key[16], uint8_t counter[16], uint8_t *dat
         for (uint8_t i = 0; i < 16; i++)
             stream[i] = counter[i];
 
+        Serial.print(F("CTR="));
+        for (uint8_t i = 0; i < 16; i++)
+        {
+            if (stream[i] < 16) Serial.print('0');
+            Serial.print(stream[i], HEX);
+        }
+        Serial.println();
+
         aes128EncryptBlock(key, stream);
+
+        Serial.print(F("KS="));
+        for (uint8_t i = 0; i < 16; i++)
+        {
+            if (stream[i] < 16) Serial.print('0');
+            Serial.print(stream[i], HEX);
+        }
+        Serial.println();
 
         uint8_t n = (length < 16) ? length : 16;
 
@@ -519,75 +539,6 @@ static void gcmMakeTag(
     for (uint8_t i = 0; i < 16; i++)
         tag[i] = work[i] ^ ctx.Y[i];
 }
-
-static void tlsGcmEncryptRecord(
-    const uint8_t key[16],
-    const uint8_t fixedIV[4],
-    uint64_t sequenceNumber,
-    uint8_t contentType,
-    uint8_t versionMajor,
-    uint8_t versionMinor,
-    uint8_t *plaintext,
-    uint16_t plaintextLength,
-    uint8_t tag[16])
-{
-    // 1. Build TLS nonce
-    uint8_t nonce[12];
-
-    tlsGcmMakeNonce(
-        nonce,
-        fixedIV,
-        sequenceNumber
-    );
-
-    // 2. Build GCM J0
-    uint8_t J0[16];
-
-    tlsGcmMakeJ0(
-        J0,
-        nonce
-    );
-
-    // 3. Build TLS AAD
-    uint8_t aad[13];
-
-    tlsGcmMakeAAD(
-        aad,
-        sequenceNumber,
-        contentType,
-        versionMajor,
-        versionMinor,
-        plaintextLength
-    );
-
-    // 4. Counter = J0 + 1
-    uint8_t counter[16];
-
-    for (uint8_t i = 0; i < 16; i++)
-        counter[i] = J0[i];
-
-    gcmIncrementCounter(counter);
-
-    // 5. Encrypt plaintext in-place
-    gcmCtrCrypt(
-        key,
-        counter,
-        plaintext,
-        plaintextLength
-    );
-
-    // 6. Calculate authentication tag
-    gcmMakeTag(
-        key,
-        J0,
-        aad,
-        13,
-        plaintext,
-        plaintextLength,
-        tag
-    );
-}
-
 
 const uint8_t aesTestKey[16] PROGMEM =
 {
@@ -713,6 +664,18 @@ static bool tlsSendGCMRecord(    uint8_t contentType,    uint8_t *plaintext,    
     J0[14] = 0;
     J0[15] = 1;
 
+    Serial.print("SEQ=");
+    Serial.println((unsigned long)tlsWriteSequence);
+
+    Serial.print("J0=");
+    for (uint8_t i = 0; i < 16; i++)
+    {
+        if (J0[i] < 16) Serial.print('0');
+        Serial.print(J0[i], HEX);
+    }
+    Serial.println();
+
+
     // --------------------------------------------------
     // TLS AAD:
     //
@@ -741,6 +704,13 @@ static bool tlsSendGCMRecord(    uint8_t contentType,    uint8_t *plaintext,    
     // --------------------------------------------------
     // Counter = inc32(J0)
     // --------------------------------------------------
+    Serial.print("AAD=");
+    for (uint8_t i = 0; i < 13; i++)
+    {
+        if (aad[i] < 16) Serial.print('0');
+        Serial.print(aad[i], HEX);
+    }
+    Serial.println();
 
     for (uint8_t i = 0; i < 16; i++)
         counter[i] = J0[i];
@@ -774,6 +744,22 @@ static bool tlsSendGCMRecord(    uint8_t contentType,    uint8_t *plaintext,    
         plaintextLength,
         counter
     );
+
+    Serial.print("CT=");
+    for (uint8_t i = 0; i < plaintextLength; i++)
+    {
+        if (plaintext[i] < 16) Serial.print('0');
+        Serial.print(plaintext[i], HEX);
+    }
+    Serial.println();
+
+    Serial.print("TAG=");
+    for (uint8_t i = 0; i < 16; i++)
+    {
+        if (counter[i] < 16) Serial.print('0');
+        Serial.print(counter[i], HEX);
+    }
+    Serial.println();
     // Serial.print(F("SRAM AFTER TAG: "));
     // Serial.println(getFreeMemory());
     // Serial.print(F("CONNECTED AFTER GCM COMPUTE: "));
@@ -2850,10 +2836,10 @@ uint8_t tlsReadServerHandshake()
         return 81;
     }
 
-    Serial.print(F("SERVER CT="));
+    /*Serial.print(F("SERVER CT="));
     Serial.println(contentType, HEX);
     Serial.print(F("SERVER RL="));
-    Serial.println(recordLength);
+    Serial.println(recordLength);*/
 
     // Expect ChangeCipherSpec record (type 0x14, length 1)
     if (contentType != 0x14 || recordLength != 1)
@@ -2871,11 +2857,11 @@ uint8_t tlsReadServerHandshake()
                 return 82;
             }
 
-            Serial.print(F("ALERT level="));
-            Serial.println(alertLevel, HEX);
+            // Serial.print(F("ALERT level="));
+            // Serial.println(alertLevel, HEX);
 
-            Serial.print(F("ALERT desc="));
-            Serial.println(alertDescription, HEX);
+            // Serial.print(F("ALERT desc="));
+            // Serial.println(alertDescription, HEX);
 
             // Show alert description
             // showStage(alertDescription);
@@ -3131,7 +3117,7 @@ uint8_t runTLS()
                 // =================================================
                 // SERVER HELLO
                 // =================================================
-                Serial.println(firstByte, HEX);  
+                //Serial.println(firstByte, HEX);  
                 if (firstByte == 0x02)
                 {
                     uint32_t handshakeLength;
@@ -3417,7 +3403,7 @@ uint8_t runTLS()
                            
                 else if (firstByte == 0x0E)
                 {
-                    Serial.println(F("SHD"));
+                    //Serial.println(F("SHD"));
                     uint8_t b1;
                     uint8_t b2;
                     uint8_t b3;
@@ -3564,7 +3550,31 @@ uint8_t runTLS()
                     // ------------------------------------------------
 
                     tlsWriteSequence = 0;
+                    Serial.print("CK=");
+                    for (uint8_t i = 0; i < 16; i++)
+                    {
+                        if (clientWriteKey[i] < 16) Serial.print('0');
+                        Serial.print(clientWriteKey[i], HEX);
+                    }
+                    Serial.println();
 
+                    Serial.print("CIV=");
+                    for (uint8_t i = 0; i < 4; i++)
+                    {
+                        if (clientWriteIV[i] < 16) Serial.print('0');
+                        Serial.print(clientWriteIV[i], HEX);
+                    }
+                    Serial.println();
+
+                    Serial.print("FIN=");
+                    for (uint8_t i = 0; i < 16; i++)
+                    {
+                        if (tlsHmacInnerHash[i] < 16) Serial.print('0');
+                        Serial.print(tlsHmacInnerHash[i], HEX);
+                    }
+                    Serial.println();
+
+                
                     if (!tlsSendGCMRecord(
                             0x16,
                             tlsHmacInnerHash,
@@ -3578,8 +3588,8 @@ uint8_t runTLS()
                     //Serial.println(F("B"));
                     // NOW WAIT FOR SERVER CCS + SERVER FINISHED
                     uint8_t serverStage = tlsReadServerHandshake();
-                    Serial.print("ZZ=");
-                    Serial.println(serverStage);        
+                    //Serial.print("ZZ=");
+                    //Serial.println(serverStage);        
 
                     if (serverStage != 90)
                     {
