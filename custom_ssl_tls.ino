@@ -565,16 +565,12 @@ uint8_t clientWriteIV[4];
 uint8_t clientRandom[32];
 uint8_t serverWriteKey[16];
 uint8_t serverWriteIV[4];
+
 uint8_t tlsPrfA[32];
 uint8_t tlsPrfInput[109];
-
-
-
 uint8_t tlsHmacKeyBlock[64];
 uint8_t tlsHmacInnerHash[32];
 SHA256Context tlsHmacContext;
-
-
 bool tlsTranscriptRecord = false;
 uint64_t tlsWriteSequence = 0;
 uint64_t tlsReadSequence = 0;
@@ -1333,86 +1329,6 @@ void hmacSha256(    const uint8_t *key,    uint8_t keyLength,    const uint8_t *
 }
 
 
-void tlsPrfSha256(
-    const uint8_t *secret,
-    uint8_t secretLength,
-    const uint8_t *label,
-    uint8_t labelLength,
-    const uint8_t *seed,
-    uint8_t seedLength,
-    uint8_t *output,
-    uint16_t outputLength)
-{
-    uint8_t savedSeed[64];
-
-    for (uint8_t i = 0; i < seedLength; i++)
-        savedSeed[i] = seed[i];
-
-    uint8_t labelSeedLength = labelLength + seedLength;
-
-    // label + seed
-    for (uint8_t i = 0; i < labelLength; i++)
-        tlsPrfInput[i] = pgm_read_byte(&label[i]);
-
-    for (uint8_t i = 0; i < seedLength; i++)
-        tlsPrfInput[labelLength + i] = savedSeed[i];
-
-    // A(1)
-    hmacSha256(
-        secret,
-        secretLength,
-        tlsPrfInput,
-        labelSeedLength,
-        tlsPrfA
-    );
-
-    uint16_t produced = 0;
-
-    while (produced < outputLength)
-    {
-        // A(i) + label + seed
-        for (uint8_t i = 0; i < 32; i++)
-            tlsPrfInput[i] = tlsPrfA[i];
-
-        for (uint8_t i = 0; i < labelLength; i++)
-            tlsPrfInput[32 + i] =
-                pgm_read_byte(&label[i]);
-
-        for (uint8_t i = 0; i < seedLength; i++)
-            tlsPrfInput[32 + labelLength + i] =
-                savedSeed[i];
-
-        // P_hash block
-        hmacSha256(
-            secret,
-            secretLength,
-            tlsPrfInput,
-            32 + labelSeedLength,
-            tlsHmacInnerHash
-        );
-
-        uint16_t remaining = outputLength - produced;
-        uint8_t copyLength =
-            remaining < 32 ? remaining : 32;
-
-        for (uint8_t i = 0; i < copyLength; i++)
-            output[produced + i] = tlsHmacInnerHash[i];
-
-        produced += copyLength;
-
-        // A(i+1)
-        hmacSha256(
-            secret,
-            secretLength,
-            tlsPrfA,
-            32,
-            tlsHmacInnerHash
-        );
-
-        for (uint8_t i = 0; i < 32; i++)
-            tlsPrfA[i] = tlsHmacInnerHash[i];
-    }
-}
 
 void deriveTLSKeys()
 {
@@ -1487,7 +1403,7 @@ struct ECCWorkspace
   U256 temp2;
   U256 temp3;
   U256 temp4;
-  uint8_t product[64]; //optimized out
+  uint8_t product[64]; // this is used also for  savedSeed  inside of tlsPrfSha256
 };
 
 struct PointProjective
@@ -1894,6 +1810,88 @@ bool consumeTLSBytes(uint16_t count)
 
   return true;
 }
+
+
+void tlsPrfSha256(
+    const uint8_t *secret,
+    uint8_t secretLength,
+    const uint8_t *label,
+    uint8_t labelLength,
+    const uint8_t *seed,
+    uint8_t seedLength,
+    uint8_t *output,
+    uint16_t outputLength)
+{   
+
+    for (uint8_t i = 0; i < seedLength; i++)
+        ecc.product[i] = seed[i];
+
+    uint8_t labelSeedLength = labelLength + seedLength;
+
+    // label + seed
+    for (uint8_t i = 0; i < labelLength; i++)
+        tlsPrfInput[i] = pgm_read_byte(&label[i]);
+
+    for (uint8_t i = 0; i < seedLength; i++)
+        tlsPrfInput[labelLength + i] = ecc.product[i];
+
+    // A(1)
+    hmacSha256(
+        secret,
+        secretLength,
+        tlsPrfInput,
+        labelSeedLength,
+        tlsPrfA
+    );
+
+    uint16_t produced = 0;
+
+    while (produced < outputLength)
+    {
+        // A(i) + label + seed
+        for (uint8_t i = 0; i < 32; i++)
+            tlsPrfInput[i] = tlsPrfA[i];
+
+        for (uint8_t i = 0; i < labelLength; i++)
+            tlsPrfInput[32 + i] =
+                pgm_read_byte(&label[i]);
+
+        for (uint8_t i = 0; i < seedLength; i++)
+            tlsPrfInput[32 + labelLength + i] =
+                ecc.product[i];
+
+        // P_hash block
+        hmacSha256(
+            secret,
+            secretLength,
+            tlsPrfInput,
+            32 + labelSeedLength,
+            tlsHmacInnerHash
+        );
+
+        uint16_t remaining = outputLength - produced;
+        uint8_t copyLength =
+            remaining < 32 ? remaining : 32;
+
+        for (uint8_t i = 0; i < copyLength; i++)
+            output[produced + i] = tlsHmacInnerHash[i];
+
+        produced += copyLength;
+
+        // A(i+1)
+        hmacSha256(
+            secret,
+            secretLength,
+            tlsPrfA,
+            32,
+            tlsHmacInnerHash
+        );
+
+        for (uint8_t i = 0; i < 32; i++)
+            tlsPrfA[i] = tlsHmacInnerHash[i];
+    }
+}
+
 
 // bool readTLSRecordHeader( uint8_t &contentType, uint8_t &versionMajor, uint8_t &versionMinor, uint16_t &recordLength)
 // {
