@@ -422,23 +422,23 @@ static void gcmCtrCrypt(
         for (uint8_t i = 0; i < 16; i++)
             stream[i] = counter[i];
 
-        Serial.print(F("CTR="));
-        for (uint8_t i = 0; i < 16; i++)
-        {
-            if (stream[i] < 16) Serial.print('0');
-            Serial.print(stream[i], HEX);
-        }
-        Serial.println();
+        // Serial.print(F("CTR="));
+        // for (uint8_t i = 0; i < 16; i++)
+        // {
+        //     if (stream[i] < 16) Serial.print('0');
+        //     Serial.print(stream[i], HEX);
+        // }
+        // Serial.println();
 
         aes128EncryptBlock(key, stream);
 
-        Serial.print(F("KS="));
-        for (uint8_t i = 0; i < 16; i++)
-        {
-            if (stream[i] < 16) Serial.print('0');
-            Serial.print(stream[i], HEX);
-        }
-        Serial.println();
+        // Serial.print(F("KS="));
+        // for (uint8_t i = 0; i < 16; i++)
+        // {
+        //     if (stream[i] < 16) Serial.print('0');
+        //     Serial.print(stream[i], HEX);
+        // }
+        // Serial.println();
 
         uint8_t n = (length < 16) ? length : 16;
 
@@ -660,16 +660,16 @@ static bool tlsSendGCMRecord(    uint8_t contentType,    uint8_t *plaintext,    
     J0[14] = 0;
     J0[15] = 1;
 
-    Serial.print("SEQ=");
-    Serial.println((unsigned long)tlsWriteSequence);
+    // Serial.print("SEQ=");
+    // Serial.println((unsigned long)tlsWriteSequence);
 
-    Serial.print("J0=");
-    for (uint8_t i = 0; i < 16; i++)
-    {
-        if (J0[i] < 16) Serial.print('0');
-        Serial.print(J0[i], HEX);
-    }
-    Serial.println();
+    // Serial.print("J0=");
+    // for (uint8_t i = 0; i < 16; i++)
+    // {
+    //     if (J0[i] < 16) Serial.print('0');
+    //     Serial.print(J0[i], HEX);
+    // }
+    // Serial.println();
 
 
     // --------------------------------------------------
@@ -700,13 +700,13 @@ static bool tlsSendGCMRecord(    uint8_t contentType,    uint8_t *plaintext,    
     // --------------------------------------------------
     // Counter = inc32(J0)
     // --------------------------------------------------
-    Serial.print("AAD=");
-    for (uint8_t i = 0; i < 13; i++)
-    {
-        if (aad[i] < 16) Serial.print('0');
-        Serial.print(aad[i], HEX);
-    }
-    Serial.println();
+    // Serial.print("AAD=");
+    // for (uint8_t i = 0; i < 13; i++)
+    // {
+    //     if (aad[i] < 16) Serial.print('0');
+    //     Serial.print(aad[i], HEX);
+    // }
+    // Serial.println();
 
     for (uint8_t i = 0; i < 16; i++)
         counter[i] = J0[i];
@@ -741,21 +741,21 @@ static bool tlsSendGCMRecord(    uint8_t contentType,    uint8_t *plaintext,    
         counter
     );
 
-    Serial.print("CT=");
-    for (uint8_t i = 0; i < plaintextLength; i++)
-    {
-        if (plaintext[i] < 16) Serial.print('0');
-        Serial.print(plaintext[i], HEX);
-    }
-    Serial.println();
+    // Serial.print("CT=");
+    // for (uint8_t i = 0; i < plaintextLength; i++)
+    // {
+    //     if (plaintext[i] < 16) Serial.print('0');
+    //     Serial.print(plaintext[i], HEX);
+    // }
+    // Serial.println();
 
-    Serial.print("TAG=");
-    for (uint8_t i = 0; i < 16; i++)
-    {
-        if (counter[i] < 16) Serial.print('0');
-        Serial.print(counter[i], HEX);
-    }
-    Serial.println();
+    // Serial.print("TAG=");
+    // for (uint8_t i = 0; i < 16; i++)
+    // {
+    //     if (counter[i] < 16) Serial.print('0');
+    //     Serial.print(counter[i], HEX);
+    // }
+    // Serial.println();
     // Serial.print(F("SRAM AFTER TAG: "));
     // Serial.println(getFreeMemory());
     // Serial.print(F("CONNECTED AFTER GCM COMPUTE: "));
@@ -1328,27 +1328,119 @@ void hmacSha256(    const uint8_t *key,    uint8_t keyLength,    const uint8_t *
     );
 }
 
+void printHex(
+    const __FlashStringHelper *label,
+    const uint8_t *data,
+    uint8_t length,
+    bool reverse = false)
+{
+    Serial.print(label);
 
+    if (reverse)
+    {
+        for (int16_t i = (int16_t)length - 1; i >= 0; i--)
+        {
+            if (data[i] < 16)
+                Serial.print('0');
+
+            Serial.print(data[i], HEX);
+        }
+    }
+    else
+    {
+        for (uint8_t i = 0; i < length; i++)
+        {
+            if (data[i] < 16)
+                Serial.print('0');
+
+            Serial.print(data[i], HEX);
+        }
+    }
+
+    Serial.println();
+}
 
 void deriveTLSKeys()
 {
-    //uint8_t tlsKeyBlock[40];
+    // ============================================================
+    // ECDHE SHARED SECRET
+    // Internal U256 is little-endian.
+    // Print in big-endian / TLS byte order.
+    // ============================================================
+
+    printHex(
+        F("ECDHE_RAW="),
+        ecdheSharedSecret.v,
+        32,
+        true
+    );
+
+    // ============================================================
+    // MASTER SECRET SEED
     // client_random || server_random
+    // ============================================================
+
     for (uint8_t i = 0; i < 32; i++)
     {
-        tlsHmacKeyBlock[i] = clientRandom[i];
-        tlsHmacKeyBlock[32 + i] = serverRandom[i];
+        tlsHmacKeyBlock[i] =
+            clientRandom[i];
+
+        tlsHmacKeyBlock[32 + i] =
+            serverRandom[i];
     }
 
-    const uint8_t masterLabel[] PROGMEM = "master secret";
+    printHex(
+        F("CLIENT_RANDOM="),
+        clientRandom,
+        32
+    );
+
+    printHex(
+        F("SERVER_RANDOM="),
+        serverRandom,
+        32
+    );
+
+    printHex(
+        F("MASTER_SEED="),
+        tlsHmacKeyBlock,
+        64
+    );
+
+    // ============================================================
+    // Convert ECDHE shared secret from internal little-endian
+    // representation to TLS big-endian representation.
+    // ============================================================
 
     for (uint8_t i = 0; i < 16; i++)
     {
-        uint8_t t = ecdheSharedSecret.v[i];
+        uint8_t t =
+            ecdheSharedSecret.v[i];
+
         ecdheSharedSecret.v[i] =
             ecdheSharedSecret.v[31 - i];
-        ecdheSharedSecret.v[31 - i] = t;
+
+        ecdheSharedSecret.v[31 - i] =
+            t;
     }
+
+    printHex(
+        F("ECDHE_PRF="),
+        ecdheSharedSecret.v,
+        32
+    );
+
+    // ============================================================
+    // MASTER SECRET
+    // PRF(
+    //     ECDHE shared secret,
+    //     "master secret",
+    //     client_random || server_random
+    // )
+    // ============================================================
+
+    const uint8_t masterLabel[] PROGMEM =
+        "master secret";
 
     tlsPrfSha256(
         ecdheSharedSecret.v,
@@ -1361,15 +1453,43 @@ void deriveTLSKeys()
         48
     );
 
+    printHex(
+        F("MASTER_SECRET="),
+        tlsMasterSecret,
+        48
+    );
+
+    // ============================================================
+    // KEY EXPANSION SEED
     // server_random || client_random
-    // server_random || client_random
+    // ============================================================
+
     for (uint8_t i = 0; i < 32; i++)
     {
-        tlsHmacKeyBlock[i]      = serverRandom[i];
-        tlsHmacKeyBlock[32 + i] = clientRandom[i];
+        tlsHmacKeyBlock[i] =
+            serverRandom[i];
+
+        tlsHmacKeyBlock[32 + i] =
+            clientRandom[i];
     }
 
-    const uint8_t keyLabel[] PROGMEM = "key expansion";
+    printHex(
+        F("KEY_EXPANSION_SEED="),
+        tlsHmacKeyBlock,
+        64
+    );
+
+    // ============================================================
+    // KEY BLOCK
+    //
+    // 0..15   client_write_key
+    // 16..31  server_write_key
+    // 32..35  client_write_IV
+    // 36..39  server_write_IV
+    // ============================================================
+
+    const uint8_t keyLabel[] PROGMEM =
+        "key expansion";
 
     tlsPrfSha256(
         tlsMasterSecret,
@@ -1382,18 +1502,68 @@ void deriveTLSKeys()
         40
     );
 
+    printHex(
+        F("KEY_BLOCK="),
+        tlsPrfInput,
+        40
+    );
+
+    // ============================================================
+    // CLIENT WRITE KEY
+    // ============================================================
+
     for (uint8_t i = 0; i < 16; i++)
-        clientWriteKey[i] = tlsPrfInput[i];
+        clientWriteKey[i] =
+            tlsPrfInput[i];
+
+    printHex(
+        F("CLIENT_WRITE_KEY="),
+        clientWriteKey,
+        16
+    );
+
+    // ============================================================
+    // SERVER WRITE KEY
+    // ============================================================
+
+    for (uint8_t i = 0; i < 16; i++)
+        serverWriteKey[i] =
+            tlsPrfInput[16 + i];
+
+    printHex(
+        F("SERVER_WRITE_KEY="),
+        serverWriteKey,
+        16
+    );
+
+    // ============================================================
+    // CLIENT WRITE IV
+    // ============================================================
 
     for (uint8_t i = 0; i < 4; i++)
-        clientWriteIV[i] = tlsPrfInput[32 + i];
-    for (uint8_t i = 0; i < 16; i++)
-        serverWriteKey[i] = tlsPrfInput[16 + i];
+        clientWriteIV[i] =
+            tlsPrfInput[32 + i];
+
+    printHex(
+        F("CLIENT_WRITE_IV="),
+        clientWriteIV,
+        4
+    );
+
+    // ============================================================
+    // SERVER WRITE IV
+    // ============================================================
+
     for (uint8_t i = 0; i < 4; i++)
-        serverWriteIV[i] = tlsPrfInput[36 + i];
+        serverWriteIV[i] =
+            tlsPrfInput[36 + i];
+
+    printHex(
+        F("SERVER_WRITE_IV="),
+        serverWriteIV,
+        4
+    );
 }
-
-
 struct ECCWorkspace
 {
   Point point1;
@@ -1694,6 +1864,9 @@ const uint16_t clientHelloLength = sizeof(clientHello);
 void printHexPROGMEM(  const uint8_t *buffer,  uint16_t length)
 {
 }
+
+
+
 
 size_t sendClientHello()
 {
@@ -3548,7 +3721,7 @@ uint8_t runTLS()
                     // ------------------------------------------------
 
                     tlsWriteSequence = 0;
-                    Serial.print("CK=");
+                    /*Serial.print("CK=");
                     for (uint8_t i = 0; i < 16; i++)
                     {
                         if (clientWriteKey[i] < 16) Serial.print('0');
@@ -3570,7 +3743,7 @@ uint8_t runTLS()
                         if (tlsHmacInnerHash[i] < 16) Serial.print('0');
                         Serial.print(tlsHmacInnerHash[i], HEX);
                     }
-                    Serial.println();
+                    Serial.println();*/
 
                 
                     if (!tlsSendGCMRecord(
