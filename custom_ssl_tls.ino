@@ -1,7 +1,7 @@
 
 #include <Ethernet.h>
 #include <avr/pgmspace.h>
-#include <Dns.h>
+//#include <Dns.h>
 #include "U256.h"
 
 // #define TURN_LCD_ON
@@ -2025,7 +2025,7 @@ void tlsPrfSha256(
             32 + labelSeedLength,
             tlsHmacInnerHash
         );
-
+        printHex(F("PRF_BLOCK="), tlsHmacInnerHash, 32);
         uint16_t remaining = outputLength - produced;
         uint8_t copyLength =
             remaining < 32 ? remaining : 32;
@@ -3172,7 +3172,7 @@ uint8_t tlsReadServerHandshake()
     return 90;          // Handshake complete
 }
 
-bool networkConnect()
+bool networkConnectDNS()
 {
     DNSClient dnsClient;
 
@@ -3186,6 +3186,19 @@ bool networkConnect()
         return false;
 
     return client.connect(ip, port);
+}
+
+
+bool networkConnect()
+{
+    IPAddress ip;
+    const char *hostname = "api.coinpaprika.com";
+    const uint16_t port = 443;
+
+    /* if (Ethernet.hostByName(hostname, ip) != 1)
+        return false;
+ */
+    return client.connect(hostname, port);
 }
 
 uint8_t runTLS()
