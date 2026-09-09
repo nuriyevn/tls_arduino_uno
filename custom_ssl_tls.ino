@@ -579,6 +579,37 @@ void tlsTranscriptUpdateByte(uint8_t value)
 {
     sha256UpdateByte(tlsHmacContext, value);
 }
+void printHex(
+    const __FlashStringHelper *label,
+    const uint8_t *data,
+    uint8_t length,
+    bool reverse = false)
+{
+    Serial.print(label);
+
+    if (reverse)
+    {
+        for (int16_t i = (int16_t)length - 1; i >= 0; i--)
+        {
+            if (data[i] < 16)
+                Serial.print('0');
+
+            Serial.print(data[i], HEX);
+        }
+    }
+    else
+    {
+        for (uint8_t i = 0; i < length; i++)
+        {
+            if (data[i] < 16)
+                Serial.print('0');
+
+            Serial.print(data[i], HEX);
+        }
+    }
+
+    Serial.println();
+}
 
 void tlsTranscriptFinal(uint8_t digest[32])
 {
@@ -653,7 +684,7 @@ static bool tlsSendGCMRecord(    uint8_t contentType,    uint8_t *plaintext,    
     J0[13] = 0;
     J0[14] = 0;
     J0[15] = 1;
-
+    //printHex(F("J0="), J0, 16);
     // Serial.print("SEQ=");
     // Serial.println((unsigned long)tlsWriteSequence);
 
@@ -1321,15 +1352,12 @@ void hmacSha256(    const uint8_t *key,    uint8_t keyLength,    const uint8_t *
         output
     );
 }
-
 void printHex(
-    const __FlashStringHelper *label,
+    const char *label,
     const uint8_t *data,
     uint8_t length,
     bool reverse = false)
-{
-    Serial.print(label);
-
+{   
     if (reverse)
     {
         for (int16_t i = (int16_t)length - 1; i >= 0; i--)
@@ -1353,7 +1381,6 @@ void printHex(
 
     Serial.println();
 }
-
 
 
 void deriveTLSKeys()
@@ -1384,23 +1411,9 @@ void deriveTLSKeys()
             serverRandom[i];
     }
 
-    printHex(
-        F("CLIENT_RANDOM="),
-        clientRandom,
-        32
-    );
-
-    printHex(
-        F("SERVER_RANDOM="),
-        serverRandom,
-        32
-    );
-
-    printHex(
-        F("MASTER_SEED="),
-        tlsHmacKeyBlock,
-        64
-    );
+    // printHex(        F("CLIENT_RANDOM="),        clientRandom,        32    );
+    // printHex(        F("SERVER_RANDOM="),        serverRandom,        32    );
+    // printHex(        F("MASTER_SEED="),        tlsHmacKeyBlock,        64    );
 
     // ============================================================
     // Convert ECDHE shared secret from internal little-endian
@@ -1470,11 +1483,7 @@ void deriveTLSKeys()
             clientRandom[i];
     }
 
-    printHex(
-        F("KEY_EXPANSION_SEED="),
-        tlsHmacKeyBlock,
-        64
-    );
+    //printHex(        F("KEY_EXPANSION_SEED="),        tlsHmacKeyBlock,        64    );
 
     // ============================================================
     // KEY BLOCK
@@ -1495,13 +1504,13 @@ void deriveTLSKeys()
         13,
         tlsHmacKeyBlock,
         64,
-        tlsPrfInput,
+        ecc.temp3.v,
         40
     );
 
     printHex(
         F("KEY_BLOCK="),
-        tlsPrfInput,
+        ecc.temp3.v,
         40
     );
 
@@ -1511,7 +1520,7 @@ void deriveTLSKeys()
 
     for (uint8_t i = 0; i < 16; i++)
         clientWriteKey[i] =
-            tlsPrfInput[i];
+            ecc.temp3.v[i];
 
     printHex(
         F("CLIENT_WRITE_KEY="),
@@ -1525,7 +1534,7 @@ void deriveTLSKeys()
 
     for (uint8_t i = 0; i < 16; i++)
         serverWriteKey[i] =
-            tlsPrfInput[16 + i];
+            ecc.temp3.v[16 + i];
 
     printHex(
         F("SERVER_WRITE_KEY="),
@@ -1539,7 +1548,7 @@ void deriveTLSKeys()
 
     for (uint8_t i = 0; i < 4; i++)
         clientWriteIV[i] =
-            tlsPrfInput[32 + i];
+            ecc.temp3.v[32 + i];
 
     printHex(
         F("CLIENT_WRITE_IV="),
@@ -1553,7 +1562,7 @@ void deriveTLSKeys()
 
     for (uint8_t i = 0; i < 4; i++)
         serverWriteIV[i] =
-            tlsPrfInput[36 + i];
+            ecc.temp3.v[36 + i];
 
     printHex(
         F("SERVER_WRITE_IV="),
@@ -1975,9 +1984,9 @@ void tlsPrfSha256(
     uint16_t outputLength)
 {   
 
-    printHex(F("PRF_SECRET="), secret, secretLength);
-    printHex(F("PRF_LABEL="), label, labelLength);
-    printHex(F("PRF_SEED="), seed, seedLength);
+    // printHex(F("PRF_SECRET="), secret, secretLength);
+    // printHex(F("PRF_LABEL="), label, labelLength);
+    // printHex(F("PRF_SEED="), seed, seedLength);
     for (uint8_t i = 0; i < seedLength; i++)
         ecc.product[i] = seed[i];
 
@@ -1985,7 +1994,7 @@ void tlsPrfSha256(
 
     // label + seed
     for (uint8_t i = 0; i < labelLength; i++)
-        tlsPrfInput[i] = label[i];
+        tlsPrfInput[i] = pgm_read_byte(&label[i]);
 
     for (uint8_t i = 0; i < seedLength; i++)
         tlsPrfInput[labelLength + i] = ecc.product[i];
@@ -2012,7 +2021,7 @@ void tlsPrfSha256(
             tlsPrfInput[i] = tlsPrfA[i];
 
         for (uint8_t i = 0; i < labelLength; i++)
-            tlsPrfInput[32 + i] = label[i];
+            tlsPrfInput[32 + i] = pgm_read_byte(&label[i]);
         for (uint8_t i = 0; i < seedLength; i++)
             tlsPrfInput[32 + labelLength + i] =
                 ecc.product[i];
@@ -2025,6 +2034,7 @@ void tlsPrfSha256(
             32 + labelSeedLength,
             tlsHmacInnerHash
         );
+        printHex("PRFB=", tlsHmacInnerHash, 32);
 
         uint16_t remaining = outputLength - produced;
         uint8_t copyLength =
@@ -2032,9 +2042,8 @@ void tlsPrfSha256(
 
         for (uint8_t i = 0; i < copyLength; i++)
             output[produced + i] = tlsHmacInnerHash[i];
-
+        printHex(F("OAC="), output, copyLength>>1);
         produced += copyLength;
-
         // A(i+1)
         hmacSha256(
             secret,
@@ -2043,9 +2052,11 @@ void tlsPrfSha256(
             32,
             tlsHmacInnerHash
         );
+        printHex(F("OAA2="), output, produced>>1);
 
         for (uint8_t i = 0; i < 32; i++)
             tlsPrfA[i] = tlsHmacInnerHash[i];
+
     }
 }
 
@@ -3729,7 +3740,8 @@ uint8_t runTLS()
                     }
                     Serial.println();*/
 
-                
+                    //printHex(F("FINISHED="), tlsHmacInnerHash, 16);
+                    //printHex(F("CLIENT_KEY="), clientWriteKey, 16);
                     if (!tlsSendGCMRecord(
                             0x16,
                             tlsHmacInnerHash,
