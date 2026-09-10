@@ -21,12 +21,16 @@
 
 #if defined(AVR_ARCH)
 
+
 #include <Arduino.h>
 #include <Ethernet.h>
 #include <avr/pgmspace.h>
-//#include <Dns.h>
 #include "U256.h"
 //#include "lcd.h"
+
+#define USE_DNS_LIB
+#include <Dns.h>
+
 
 //#define TURN_LCD_ON 1
 #define DEBUG_TLS_ALERTS 0
@@ -4181,6 +4185,27 @@ static bool tlsSendHttpGet()
 }
 
 
+#ifdef USE_DNS_LIB
+
+
+bool networkConnect()
+{
+    DNSClient dnsClient;
+
+    IPAddress ip;
+    IPAddress dnsIP = Ethernet.dnsServerIP();
+
+    dnsClient.begin(dnsIP);
+    const char *hostname = "api.coinpaprika.com";
+    const uint16_t port = 443;
+    if (dnsClient.getHostByName(hostname, ip) != 1)
+        return false;
+    Serial.println("C");
+    return client.connect(ip, port);
+}
+#else
+
+
 bool networkConnect()
 {
 //     DNSClient dnsClient;
@@ -4197,23 +4222,7 @@ bool networkConnect()
     return client.connect(hostname, port);
 }
 
-/*
-bool networkConnectDNS()
-{
-    DNSClient dnsClient;
-
-    IPAddress ip;
-    IPAddress dnsIP = Ethernet.dnsServerIP();
-
-    dnsClient.begin(dnsIP);
-    const char *hostname = "api.coinpaprika.com";
-    const uint16_t port = 443;
-    if (dnsClient.getHostByName(hostname, ip) != 1)
-        return false;
-
-    return client.connect(ip, port);
-}
-*/
+#endif
 
 #if defined(AVR_ARCH)
 
@@ -4245,7 +4254,7 @@ void setup()
     printIP(Ethernet.localIP());
 
     delay(1000);
-
+    
     uint8_t stage = runTLS();
 
     #ifdef TURN_LCD_ON
